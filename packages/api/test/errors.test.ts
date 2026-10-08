@@ -115,7 +115,7 @@ describe('error mapping (14.3)', () => {
     expect(res.body).not.toContain('at ');
   });
 
-  it('invalid JSON bodies → 400 validation_error', async () => {
+  it('invalid JSON bodies → 400 invalid_json', async () => {
     const res = await t.app.inject({
       method: 'POST',
       url: '/api/mcp/servers',
@@ -123,7 +123,7 @@ describe('error mapping (14.3)', () => {
       payload: '{not json',
     });
     expect(res.statusCode).toBe(400);
-    expect(json<ErrorResponse>(res).error.code).toBe('validation_error');
+    expect(json<ErrorResponse>(res).error.code).toBe('invalid_json');
   });
 
   it('bodies over 1 MiB → 413 in the same error format', async () => {
@@ -134,7 +134,7 @@ describe('error mapping (14.3)', () => {
       payload: JSON.stringify({ source: 'json', json: 'x'.repeat(1024 * 1024) }),
     });
     expect(res.statusCode).toBe(413);
-    expect(json<ErrorResponse>(res).error.code).toBe('validation_error');
+    expect(json<ErrorResponse>(res).error.code).toBe('payload_too_large');
     expect(t.hub.callsTo('servers.create')).toHaveLength(0);
   });
 
@@ -158,9 +158,13 @@ describe('mapError (unit)', () => {
     expect(mapError(null).status).toBe(500);
   });
 
-  it('keeps Fastify 4xx status codes', () => {
+  it('keeps Fastify 4xx status codes and gives them specific codes (D5)', () => {
     const err = Object.assign(new Error('Unsupported Media Type'), { statusCode: 415 });
-    expect(mapError(err)).toMatchObject({ status: 415, body: { error: { code: 'validation_error' } } });
+    expect(mapError(err)).toMatchObject({ status: 415, body: { error: { code: 'unsupported_media_type' } } });
+    const ctp = Object.assign(new Error('Body cannot be empty'), { statusCode: 400, code: 'FST_ERR_CTP_EMPTY_JSON_BODY' });
+    expect(mapError(ctp)).toMatchObject({ status: 400, body: { error: { code: 'invalid_json' } } });
+    const other = Object.assign(new Error('bad'), { statusCode: 400 });
+    expect(mapError(other)).toMatchObject({ status: 400, body: { error: { code: 'validation_error' } } });
     const server = Object.assign(new Error('x'), { statusCode: 503 });
     expect(mapError(server).status).toBe(500);
   });

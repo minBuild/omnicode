@@ -122,3 +122,47 @@ export interface OAuthStartResult {
 }
 
 export type PresetView = Preset;
+
+// ---------------------------------------------------------------------------
+// 인증 (설계 0002 8장)
+// ---------------------------------------------------------------------------
+export type AuthMode = 'session' | 'dev';
+
+export interface AuthStatus {
+  mode: AuthMode;
+  authenticated: boolean;
+  /** 패스키가 하나도 없어 /setup 으로 첫 패스키를 등록해야 한다 */
+  setupRequired: boolean;
+  /** 이 시각까지는 재인증 없이 고위험 작업을 할 수 있다. null 이면 재인증이 필요하다 */
+  recentAuthUntil: string | null;
+  session: { id: string; createdAt: string; expiresAt: string } | null;
+}
+
+/** WebAuthn 옵션 응답. options 는 @simplewebauthn 의 *OptionsJSON 그대로다 */
+export interface WebAuthnChallenge {
+  challengeId: string;
+  options: Record<string, unknown>;
+}
+
+export interface PasskeyView {
+  id: string;
+  label: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  deviceType: 'singleDevice' | 'multiDevice';
+  /** 비밀번호 관리자(iCloud·Google 등)로 동기화되는 패스키 */
+  backedUp: boolean;
+}
+
+export interface SessionView {
+  id: string;
+  current: boolean;
+  createdAt: string;
+  lastSeenAt: string;
+  expiresAt: string;
+  userAgent: string | null;
+}
+
+export interface ReauthResult {
+  recentAuthUntil: string;
+}

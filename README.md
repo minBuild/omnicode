@@ -50,7 +50,18 @@ node packages/agentd/dist/main.js &          # HOME 의 CLI 설정을 편집한�
 node packages/api/dist/main.js               # API :8080, Hub 127.0.0.1:7410
 ```
 
-화면은 `http://127.0.0.1:8080/mcp` (헤더 `Authorization: Bearer <OMNICODE_DEV_TOKEN>` 또는 쿠키 `__Host-omnicode_dev`). 환경변수 전체 목록은 [`.env.example`](.env.example).
+화면은 `http://127.0.0.1:8080/mcp`. 개발 모드에서는 로그인 화면에 `OMNICODE_DEV_TOKEN` 값을 넣으면 된다 (API는 `Authorization: Bearer <토큰>`도 받는다).
+
+운영과 같은 패스키 로그인(설계 [0002](docs/design/0002-auth.md))을 로컬에서 쓰려면 `OMNICODE_DEV_TOKEN` 대신 아래처럼 띄운다. 패스키는 보안 컨텍스트가 필요하므로 `localhost`로 접속한다.
+
+```bash
+export OMNICODE_AUTH_MODE=session
+export OMNICODE_PUBLIC_URL=http://localhost:8080
+node packages/api/dist/main.js
+cat /tmp/omnicode-dev/setup-token             # 첫 패스키 등록용 1회 토큰 → http://localhost:8080/setup
+```
+
+화면만 고칠 때는 `npm run dev --workspace @omnicode/web`(Vite, `/api`·`/oauth`를 :8080으로 프록시)를 쓰거나, API에 `OMNICODE_WEB_LIVE=1`을 주면 웹을 다시 빌드해도 재시작이 필요 없다. 환경변수 전체 목록은 [`.env.example`](.env.example).
 
 ## 테스트
 
@@ -64,7 +75,8 @@ node packages/api/dist/main.js               # API :8080, Hub 127.0.0.1:7410
 | `packages/hub/test/downstream` | SDK 클라이언트가 에이전트 역할로 접속: 토큰, 정책, progress, 알림 |
 | `packages/hub/test/hub.integration.test.ts` | 추가 → 승인 → 동기화 → 호출 → 감사 → 삭제 전체 흐름 |
 | `packages/agentd/test` | CLI 설정 파일 편집(바이트 보존), 소켓 프로토콜 |
-| `packages/api/test` | 라우트, 오류 매핑, 보안 헤더, 콜백 페이지 |
+| `packages/api/test` | 라우트, 오류 매핑, 보안 헤더, 콜백 페이지, 패스키 로그인·재인증 (소프트웨어 인증기로 실제 WebAuthn 검증) |
+| `packages/web/test` | API 클라이언트·가로채기·순수 함수 (node), 화면 상호작용 (`dom/*.test.tsx`, jsdom) |
 
 ## 배포
 

@@ -115,4 +115,21 @@ describe('createDevAuthHooks (DEV ONLY)', () => {
   it('refuses short tokens', () => {
     expect(() => createDevAuthHooks({ token: 'short' })).toThrow();
   });
+
+  it('serves /api/auth/status and a browser dev-login that sets the dev cookie', async () => {
+    const { app } = devApp();
+    const anon = await app.inject({ method: 'GET', url: '/api/auth/status' });
+    expect(json(anon)).toMatchObject({ mode: 'dev', authenticated: false, setupRequired: false });
+    const bad = await app.inject({ method: 'POST', url: '/api/auth/dev-login', payload: { token: 'nope' } });
+    expect(bad.statusCode).toBe(401);
+    const ok = await app.inject({ method: 'POST', url: '/api/auth/dev-login', payload: { token } });
+    expect(ok.statusCode).toBe(204);
+    const cookie = String(ok.headers['set-cookie']);
+    expect(cookie).toMatch(new RegExp(`^${DEV_COOKIE_NAME}=`));
+    expect(cookie).toMatch(/HttpOnly/);
+    const me = await app.inject({ method: 'GET', url: '/api/auth/status', headers: { cookie: `${DEV_COOKIE_NAME}=${token}` } });
+    expect(json(me)).toMatchObject({ authenticated: true });
+    const out = await app.inject({ method: 'POST', url: '/api/auth/logout' });
+    expect(out.statusCode).toBe(204);
+  });
 });

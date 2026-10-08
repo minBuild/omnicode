@@ -326,9 +326,19 @@ Next steps (design 17.6)
      sudo -u omniagent ls -l /home/omniagent/.omnicode/tokens
    Rotate later from the web UI (Hub 상태 → Hub 토큰 재발급).
 
-7. CloudFront — add two public behaviors in front of the login wall (infra/cloudfront/README.md):
+7. CloudFront — no edge login function (design 0002 7). Add three behaviors (infra/cloudfront/README.md):
+     /api/*                              no cache, forward cookies, query strings and all viewer headers
+     /oauth/callback                     no cache, forward ALL query strings
      /.well-known/omnicode/client.json   cache 1 hour (origin sends Cache-Control: public, max-age=3600)
-     /oauth/callback                     no cache, forward ALL query strings, must bypass the login function
+   The distribution's domain must equal OMNICODE_PUBLIC_URL's host: passkeys are bound to it.
+
+8. First passkey (design 0002 5.1) — once omnicode.service is running with OMNICODE_AUTH_MODE=session:
+     sudo cat /var/lib/omnicode/setup-token      # one-time, valid 24 hours
+     open <OMNICODE_PUBLIC_URL>/setup and register this device's passkey with that token
+   Lost every passkey later? Reset as the service user (prints a new setup token):
+     sudo systemd-run --wait --pipe --collect -p User=omnicode -p Group=omnicode \
+       -p EnvironmentFile=/etc/omnicode/omnicode.env \
+       /usr/bin/node /opt/omnicode/packages/api/dist/main.js auth reset
 
 Then:
      edit /etc/omnicode/omnicode.env            (OMNICODE_PUBLIC_URL, OMNICODE_BACKUP_BUCKET, ...)

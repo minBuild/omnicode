@@ -100,29 +100,37 @@ export function isHubError(e: unknown): e is HubError {
   return e instanceof HubError;
 }
 
-/** API 오류 (14.3). */
+/** API 오류 (0001 14.3, 0002 8장). */
 export const API_ERROR_STATUS = {
   validation_error: 400,
+  invalid_json: 400,
   invalid_url: 400,
   ssrf_blocked: 400,
   stale_tool_hash: 400,
   oauth_state_invalid: 400,
   oauth_issuer_mismatch: 400,
   oauth_denied: 400,
+  webauthn_failed: 400,
+  challenge_invalid: 400,
   unauthenticated: 401,
   reauth_required: 401,
   forbidden: 403,
+  setup_token_invalid: 403,
   not_found: 404,
   conflict: 409,
   invalid_transition: 409,
+  payload_too_large: 413,
+  unsupported_media_type: 415,
   probe_failed: 422,
   unsupported_transport: 422,
   oauth_registration_failed: 422,
   oauth_not_applicable: 422,
+  rate_limited: 429,
   agentd_unavailable: 502,
   sync_failed: 502,
   upstream_error: 502,
   internal: 500,
+  not_implemented: 501,
 } as const;
 
 export type ApiErrorCode = keyof typeof API_ERROR_STATUS;

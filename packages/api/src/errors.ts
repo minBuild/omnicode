@@ -13,8 +13,8 @@ import {
   UpstreamError,
 } from '@omnicode/hub';
 
-/** 14.3의 코드 + API 전용 코드. `not_implemented`는 Phase 3 자리표시자(레지스트리 검색)다. */
-export type ErrorCode = ApiErrorCode | 'not_implemented';
+/** 14.3의 코드 (0002 8장 인증 코드 포함). */
+export type ErrorCode = ApiErrorCode;
 
 export interface ErrorBody {
   error: { code: ErrorCode; message: string; details?: Record<string, unknown> };
@@ -119,11 +119,21 @@ export function mapError(err: unknown): MappedError {
   }
   const statusCode = (err as { statusCode?: unknown } | null)?.statusCode;
   if (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) {
-    // Fastify 자체 오류 (본문 파싱 실패, 1MiB 초과 413, 지원하지 않는 Content-Type 415 등)
+    // Fastify 자체 오류: 본문 1 MiB 초과 413, 지원하지 않는 Content-Type 415, JSON 파싱 실패 400
     const message = err instanceof Error ? truncate(err.message, MAX_MESSAGE) : '요청을 처리할 수 없습니다.';
-    return { status: statusCode, body: errorBody('validation_error', message), unexpected: false };
+    return { status: statusCode, body: errorBody(fastifyErrorCode(err, statusCode), message), unexpected: false };
   }
   return { status: 500, body: errorBody('internal', '내부 오류가 발생했습니다.'), unexpected: true };
+}
+
+/** Fastify 내장 4xx 를 14.3 코드로 (D5) */
+export function fastifyErrorCode(err: unknown, statusCode: number): ErrorCode {
+  if (statusCode === 413) return 'payload_too_large';
+  if (statusCode === 415) return 'unsupported_media_type';
+  const code = (err as { code?: unknown } | null)?.code;
+  if (statusCode === 400 && (err instanceof SyntaxError || (typeof code === 'string' && code.startsWith('FST_ERR_CTP_')))) return 'invalid_json';
+  if (statusCode === 429) return 'rate_limited';
+  return 'validation_error';
 }
 
 /** 로그용 오류 필드. 메시지·스택을 마스킹한다 (16.6: 로그에 비밀값 0건). */

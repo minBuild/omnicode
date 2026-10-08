@@ -2,9 +2,10 @@
  * Fastify 앱 조립. main.ts만 실제 Hub를 넣고, 테스트는 가짜 Hub를 넣는다.
  */
 import { existsSync } from 'node:fs';
-import fastify, { type FastifyBaseLogger, type FastifyInstance, type FastifyReply } from 'fastify';
+import fastify, { type FastifyBaseLogger, type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import type { Logger } from 'pino';
+import { ApiError } from '@omnicode/shared';
 import type { Hub } from '@omnicode/hub';
 import type { AuthHooks } from './auth.js';
 import { errorBody, errorLogFields, mapError, type ErrorBody } from './errors.js';
@@ -23,11 +24,41 @@ export type BuildAppOptions = {
   publicUrl: string | null;
   /** packages/web/dist. 없거나 존재하지 않으면 정적 서빙을 건너뛴다 */
   staticDir?: string;
+  /** 개발용: 정적 파일을 요청 시점에 디스크에서 찾는다 (웹을 다시 빌드해도 재시작 불필요, D5) */
+  staticLive?: boolean;
+  /**
+   * 상태를 바꾸는 `/api/*` 요청의 Origin 이 이 값과 달라야 거부한다 (0002 7장 CSRF).
+   * 지정하지 않으면 publicUrl 의 origin. null 이면 Origin 비교를 하지 않는다 (Sec-Fetch-Site 검사는 한다).
+   */
+  allowedOrigin?: string | null;
   logger?: Logger;
 };
 
+const STATE_CHANGING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+/** 0002 7장: 교차 사이트에서 온 상태 변경 요청을 막는다. Origin 이 없으면(브라우저가 아닌 클라이언트) 통과 */
+export function checkSameOrigin(req: FastifyRequest, allowedOrigin: string | null): void {
+  if (!STATE_CHANGING.has(req.method) || !req.url.startsWith('/api/')) return;
+  const site = req.headers['sec-fetch-site'];
+  if (site === 'cross-site') throw new ApiError('forbidden', '다른 사이트에서 보낸 요청은 받지 않습니다.');
+  const origin = req.headers.origin;
+  if (allowedOrigin !== null && typeof origin === 'string' && origin !== allowedOrigin) {
+    throw new ApiError('forbidden', '허용되지 않은 출처(Origin)입니다.', { origin: origin.slice(0, 200) });
+  }
+}
+
+function originOf(url: string | null): string | null {
+  if (url === null) return null;
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
 export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const { hub, auth, publicUrl, staticDir, logger } = opts;
+  const allowedOrigin = opts.allowedOrigin === undefined ? originOf(publicUrl) : opts.allowedOrigin;
   // pino Logger를 FastifyBaseLogger로 좁혀 인스턴스 제네릭을 기본값(FastifyInstance)으로 유지한다
   const loggerInstance: FastifyBaseLogger | undefined = logger;
   const app: FastifyInstance = loggerInstance
@@ -45,6 +76,9 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       .send(mask(JSON.stringify(body)));
 
   app.register(fastifyCookie);
+
+  // 요청 위조 방어는 인증 훅보다 먼저, 본문 파싱보다 먼저 (0002 7장)
+  app.addHook('onRequest', async (req) => checkSameOrigin(req, allowedOrigin));
 
   // 모든 응답에 보안 헤더 (16.3). HTML에는 SPA CSP — 콜백 페이지는 더 엄격한 자체 CSP를 먼저 붙인다.
   app.addHook('onSend', async (_req, reply, payload) => {
@@ -80,8 +114,9 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   );
 
   app.register(publicRoutes, { hub, auth, publicUrl });
+  if (auth.routes) app.register(auth.routes, { prefix: '/api/auth' });
   app.register(mcpRoutes, { hub, auth, prefix: '/api/mcp' });
-  if (staticDir && existsSync(staticDir)) app.register(spaRoutes, { staticDir });
+  if (staticDir && existsSync(staticDir)) app.register(spaRoutes, { staticDir, live: opts.staticLive ?? false });
 
   return app;
 }

@@ -1,11 +1,15 @@
 #!/bin/sh
-# omnicode-backup: daily snapshot of the OmniCode registry database (design 17.4).
+# omnicode-backup: daily snapshot of the OmniCode databases (design 0001 17.4, 0002 4).
 # Installed to /usr/local/sbin; run as the `omnicode` user by omnicode-backup.timer.
 #
-#   1. sqlite3 "VACUUM INTO" -> $OMNICODE_DATA_DIR/backup/registry-<YYYY-MM-DD>.sqlite
+# For each database — registry.sqlite (required) and auth.sqlite (if present; session auth mode):
+#   1. sqlite3 "VACUUM INTO" -> $OMNICODE_DATA_DIR/backup/<name>-<YYYY-MM-DD>.sqlite
 #      (a consistent snapshot; the live DB file is never copied)
-#   2. aws s3 cp --sse AES256 -> s3://$OMNICODE_BACKUP_BUCKET/registry-<YYYY-MM-DD>.sqlite
-#   3. keep the newest 14 snapshots locally and the newest 14 in S3
+#   2. aws s3 cp --sse AES256 -> s3://$OMNICODE_BACKUP_BUCKET/<name>-<YYYY-MM-DD>.sqlite
+#   3. keep the newest 14 snapshots of each locally and the newest 14 of each in S3
+#
+# auth.sqlite holds passkey public keys and session token hashes only (no secrets), so restoring it
+# lets the owner log in with the same passkeys as long as OMNICODE_PUBLIC_URL's host is unchanged.
 #
 # Environment (from /etc/omnicode/omnicode.env via the unit):
 #   OMNICODE_BACKUP_BUCKET   required. Bucket name, optionally with a key prefix: "my-bucket/omnicode"
@@ -15,7 +19,6 @@
 set -eu
 
 DATA_DIR="${OMNICODE_DATA_DIR:-/var/lib/omnicode}"
-DB="$DATA_DIR/registry.sqlite"
 BACKUP_DIR="$DATA_DIR/backup"
 KEEP="${OMNICODE_BACKUP_KEEP:-14}"
 BUCKET="${OMNICODE_BACKUP_BUCKET:-}"
@@ -37,7 +40,6 @@ case "$KEEP" in
 esac
 command -v "$SQLITE" >/dev/null 2>&1 || die "$SQLITE not found (install sqlite3)"
 command -v "$AWS" >/dev/null 2>&1 || die "$AWS CLI not found"
-[ -f "$DB" ] || die "database not found: $DB"
 case "$DATA_DIR" in
   *\'*) die "OMNICODE_DATA_DIR must not contain a single quote" ;;
 esac
@@ -45,52 +47,66 @@ esac
 mkdir -p "$BACKUP_DIR"
 chmod 0700 "$BACKUP_DIR"
 
-# --- 1. snapshot -----------------------------------------------------------
+# --- per-database snapshot, upload, retention --------------------------------
 stamp="$(date -u +%Y-%m-%d)"
-name="registry-$stamp.sqlite"
-final="$BACKUP_DIR/$name"
-tmp="$final.tmp"
 
-rm -f -- "$tmp"
-"$SQLITE" "$DB" "VACUUM INTO '$tmp'"
-"$SQLITE" "$tmp" "PRAGMA integrity_check;" | grep -qx ok || die "integrity check failed on $tmp"
-chmod 0600 "$tmp"
-mv -f -- "$tmp" "$final"
-printf 'snapshot: %s (%s bytes)\n' "$final" "$(wc -c < "$final" | tr -d ' ')"
-
-# --- 2. upload -------------------------------------------------------------
-dest="s3://$BUCKET/$name"
-"$AWS" s3 cp --only-show-errors --sse AES256 -- "$final" "$dest"
-printf 'uploaded: %s\n' "$dest"
-
-# --- 3. retention ----------------------------------------------------------
-# File names embed a zero-padded UTC date, so sorted glob order is chronological (oldest first).
-count_local() {
+# $1 = file name prefix (snapshots are <prefix>-<YYYY-MM-DD>.sqlite)
+prune() {
+  prefix="$1"
+  # File names embed a zero-padded UTC date, so sorted glob order is chronological (oldest first).
   n=0
-  for f in "$BACKUP_DIR"/registry-*.sqlite; do
+  for f in "$BACKUP_DIR"/"$prefix"-*.sqlite; do
     [ -f "$f" ] && n=$((n + 1))
   done
-  printf '%s' "$n"
+  while [ "$n" -gt "$KEEP" ]; do
+    for f in "$BACKUP_DIR"/"$prefix"-*.sqlite; do
+      [ -f "$f" ] || continue
+      rm -f -- "$f"
+      printf 'pruned local: %s\n' "${f##*/}"
+      break
+    done
+    n=$((n - 1))
+  done
+
+  remote_keys="$("$AWS" s3 ls -- "s3://$BUCKET/$prefix-" | awk -v p="$prefix" '$4 ~ ("^" p "-[0-9-]+\\.sqlite$") { print $4 }' | sort)"
+  remote_count="$(printf '%s\n' "$remote_keys" | grep -c "^$prefix-" || true)"
+  if [ "$remote_count" -gt "$KEEP" ]; then
+    printf '%s\n' "$remote_keys" | head -n "$((remote_count - KEEP))" | while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      "$AWS" s3 rm --only-show-errors -- "s3://$BUCKET/$key"
+      printf 'pruned remote: %s\n' "$key"
+    done
+    remote_count="$KEEP"
+  fi
+  printf 'done: %s local=%s remote=%s (keep %s)\n' "$prefix" "$n" "$remote_count" "$KEEP"
 }
-local_count="$(count_local)"
-while [ "$local_count" -gt "$KEEP" ]; do
-  for f in "$BACKUP_DIR"/registry-*.sqlite; do
-    [ -f "$f" ] || continue
-    rm -f -- "$f"
-    printf 'pruned local: %s\n' "${f##*/}"
-    break
-  done
-  local_count=$((local_count - 1))
-done
 
-remote_keys="$("$AWS" s3 ls -- "s3://$BUCKET/registry-" | awk '$4 ~ /^registry-[0-9-]+\.sqlite$/ { print $4 }' | sort)"
-remote_count="$(printf '%s\n' "$remote_keys" | grep -c '^registry-' || true)"
-if [ "$remote_count" -gt "$KEEP" ]; then
-  printf '%s\n' "$remote_keys" | head -n "$((remote_count - KEEP))" | while IFS= read -r key; do
-    [ -n "$key" ] || continue
-    "$AWS" s3 rm --only-show-errors -- "s3://$BUCKET/$key"
-    printf 'pruned remote: %s\n' "$key"
-  done
-fi
+# $1 = database base name (registry|auth), $2 = 1 if the database must exist
+backup_db() {
+  base="$1"
+  db="$DATA_DIR/$base.sqlite"
+  if [ ! -f "$db" ]; then
+    [ "$2" = 1 ] && die "database not found: $db"
+    printf 'skip: %s (not present)\n' "$db"
+    return 0
+  fi
+  name="$base-$stamp.sqlite"
+  final="$BACKUP_DIR/$name"
+  tmp="$final.tmp"
 
-printf 'done: local=%s remote=%s (keep %s)\n' "$local_count" "$([ "$remote_count" -gt "$KEEP" ] && printf '%s' "$KEEP" || printf '%s' "$remote_count")" "$KEEP"
+  rm -f -- "$tmp"
+  "$SQLITE" "$db" "VACUUM INTO '$tmp'"
+  "$SQLITE" "$tmp" "PRAGMA integrity_check;" | grep -qx ok || die "integrity check failed on $tmp"
+  chmod 0600 "$tmp"
+  mv -f -- "$tmp" "$final"
+  printf 'snapshot: %s (%s bytes)\n' "$final" "$(wc -c < "$final" | tr -d ' ')"
+
+  dest="s3://$BUCKET/$name"
+  "$AWS" s3 cp --only-show-errors --sse AES256 -- "$final" "$dest"
+  printf 'uploaded: %s\n' "$dest"
+
+  prune "$base"
+}
+
+backup_db registry 1
+backup_db auth 0

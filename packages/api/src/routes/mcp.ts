@@ -37,8 +37,9 @@ const sendDeleteResult = (reply: FastifyReply, result: DeleteResult) =>
   reply.code(result.status === 'deleted' ? 200 : 202).send(result);
 
 export const mcpRoutes: FastifyPluginAsync<McpRoutesOptions> = async (api, { hub, auth }) => {
-  api.addHook('preHandler', auth.requireSession);
-  const recentAuth = { preHandler: auth.requireRecentAuth };
+  // onRequest: 본문 파싱보다 먼저 인증한다 (0002 10장)
+  api.addHook('onRequest', auth.requireSession);
+  const recentAuth = { onRequest: auth.requireRecentAuth };
 
   // --- 서버 -------------------------------------------------------------
   api.get('/servers', async () => hub.servers.list());
