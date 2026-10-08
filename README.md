@@ -3,7 +3,7 @@
 각자 자기 AWS 계정(CloudFront + EC2 + Secrets Manager)에 설치해서 쓰는 개인 에이전트 작업 환경.
 EC2에서 공식 CLI(Claude Code, Codex CLI, Gemini CLI)를 실행하고, 폰이나 PC 브라우저에서 작업을 이어간다.
 
-이 저장소의 첫 기능은 **화면에서 MCP 서버를 추가·관리하기**다. 설계는 [`docs/design/0001-mcp-management.md`](docs/design/0001-mcp-management.md)에 있고, 코드는 그 설계의 장 번호를 주석으로 가리킨다.
+이 저장소의 첫 기능은 **화면에서 MCP 서버를 추가·관리하기**다. 설계는 [`docs/design/0001-mcp-management.md`](docs/design/0001-mcp-management.md)에 있고, 코드는 그 설계의 장 번호를 주석으로 가리킨다. 남은 작업은 [`docs/handoff/0001-mcp-remaining-work.md`](docs/handoff/0001-mcp-remaining-work.md)에 우선순위와 완료 조건과 함께 정리돼 있다.
 
 ## 구조
 
