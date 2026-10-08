@@ -1,0 +1,124 @@
+/** API DTO (14장) — API와 Web이 공유한다. 비밀값은 어떤 DTO에도 들어가지 않는다. */
+import type { Agent, AuditEntry, AuthType, EventRecord, OAuthClientMode, ProtocolEra, ServerSource, ServerStatus, SyncStatus, ToolAnnotations, Transport, Preset } from './types.js';
+
+export interface BindingView {
+  enabled: boolean;
+  syncStatus: SyncStatus | null;
+  syncedAt: string | null;
+  lastError: string | null;
+}
+export type BindingsView = Record<Agent, BindingView>;
+
+export interface ToolView {
+  name: string;
+  title: string | null;
+  description: string | null;
+  annotations: ToolAnnotations | null;
+  enabled: boolean;
+  schemaHash: string;
+  approvedHash: string | null;
+  /** approvedHash가 있고 schemaHash와 다르면 true (변경 감지) */
+  changed: boolean;
+  /** approvedHash가 없으면 true (새 도구) */
+  pendingApproval: boolean;
+  inputSchema: Record<string, unknown>;
+  outputSchema: Record<string, unknown> | null;
+  approvedDefinition: Record<string, unknown> | null;
+}
+
+export interface ServerSummary {
+  id: string;
+  displayName: string;
+  status: ServerStatus;
+  transport: Transport;
+  authType: AuthType;
+  toolCount: number;
+  approvedToolCount: number;
+  changedToolCount: number;
+  bindings: BindingsView;
+  lastError: string | null;
+  updatedAt: string;
+  badges: string[];
+}
+
+export interface ServerDetail extends ServerSummary {
+  source: ServerSource;
+  presetId: string | null;
+  url: string | null;
+  canonicalUrl: string | null;
+  protocol: { era: ProtocolEra | null; version: string | null };
+  serverInfo: Record<string, unknown> | null;
+  capabilities: Record<string, unknown> | null;
+  auth: {
+    type: AuthType;
+    headerName: string | null;
+    issuer: string | null;
+    clientMode: OAuthClientMode | null;
+    requestedScope: string | null;
+    grantedScope: string | null;
+    /** OAuth 토큰 만료 시각 (있으면). 토큰 값은 절대 포함하지 않는다 */
+    expiresAt: string | null;
+    needsClientInput: boolean;
+  };
+  callTimeoutMs: number;
+  cliAutoApprove: boolean;
+  tools: ToolView[];
+  lastProbeAt: string | null;
+  toolsSyncedAt: string | null;
+  createdAt: string;
+  recentEvents: EventRecord[];
+  warnings: string[];
+}
+
+export interface SyncOutcome {
+  status: SyncStatus;
+  at: string | null;
+  error?: string;
+  result?: { added: string[]; updated: string[]; removed: string[]; unchanged: string[] };
+}
+
+export interface ApproveResult {
+  status: ServerStatus;
+  approved: string[];
+  sync: Record<Agent, SyncOutcome>;
+}
+
+export interface DeleteResult {
+  status: 'deleting' | 'deleted';
+  steps: Array<{ step: 'block' | 'sync' | 'revoke' | 'secret' | 'row'; ok: boolean; error?: string }>;
+}
+
+export interface TestResult {
+  ok: boolean;
+  latencyMs: number | null;
+  error: string | null;
+  protocol: { era: ProtocolEra | null; version: string | null };
+}
+
+export interface HubStatus {
+  version: string;
+  uptimeSec: number;
+  hub: { host: string; port: number };
+  downstreamSessions: { legacy: number; modern: number };
+  agentd: { ok: boolean; version?: string; error?: string; cli?: { claude: string | null; codex: string | null; gemini: string | null } };
+  lastSync: Record<Agent, SyncOutcome | null>;
+  allowPrivateHosts: string[];
+  allowHttpLoopback: boolean;
+  tokens: Record<Agent, { rotatedAt: string | null; graceUntil: string | null }>;
+}
+
+export interface AuditPage {
+  items: AuditEntry[];
+  nextCursor: number | null;
+}
+export interface EventPage {
+  items: EventRecord[];
+  nextCursor: number | null;
+}
+
+export interface OAuthStartResult {
+  authorizationUrl: string;
+  expiresAt: string;
+}
+
+export type PresetView = Preset;
