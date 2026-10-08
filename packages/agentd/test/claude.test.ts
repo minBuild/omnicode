@@ -3,6 +3,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CLAUDE_HEADERS_HELPER, claudeConfigPath, claudeSettingsPath, createClaudeAdapter } from '../src/adapters/claude.js';
 import { AgentdError } from '../src/errors.js';
+import type { CommandRunner } from '../src/runner.js';
 import { entry, fakeClaudeRunner, makeHome, mode, readOrUndefined, removeHome, writeFixture, type Call } from './helpers.js';
 
 const helper = CLAUDE_HEADERS_HELPER;
@@ -58,6 +59,51 @@ const desired = {
 
 function argsOf(calls: Call[]): string[][] {
   return calls.map((c) => [c.cmd, ...c.args]);
+}
+
+interface Lies {
+  /** add-json 이 exit 0 을 돌려주지만 파일에 쓰지 않는다 */
+  forgetAdd?: string;
+  /** add-json 뒤 항목의 url 을 다른 값으로 바꿔 둔다 */
+  wrongUrl?: string;
+  /** remove 가 exit 0 을 돌려주지만 지우지 않는다 */
+  keepOnRemove?: string;
+}
+
+const WRONG_URL = 'http://127.0.0.1:7410/mcp/someone-else';
+
+/** D4: 성공(exit 0)을 보고하면서 ~/.claude.json 을 기대와 다르게 남기는 가짜 CLI. fakeClaudeRunner 를 감싼다. */
+function lyingClaudeRunner(home: string, lies: Lies): { runner: CommandRunner; calls: Call[] } {
+  const base = fakeClaudeRunner(home);
+  const file = claudeConfigPath(home);
+  const runner: CommandRunner = {
+    async run(cmd, args, opts) {
+      const sub = args[1];
+      const name = args[2] ?? '';
+      if ((sub === 'add-json' && name === lies.forgetAdd) || (sub === 'remove' && name === lies.keepOnRemove)) {
+        base.calls.push({ cmd, args: [...args] });
+        return { code: 0, stdout: `ok ${sub} ${name}`, stderr: '' };
+      }
+      const r = await base.runner.run(cmd, args, opts);
+      if (sub === 'add-json' && name === lies.wrongUrl && r.code === 0) {
+        const cfg = JSON.parse(await fs.readFile(file, 'utf8')) as { mcpServers: Record<string, { url: string }> };
+        cfg.mcpServers[name]!.url = WRONG_URL;
+        await fs.writeFile(file, JSON.stringify(cfg, null, 2) + '\n');
+      }
+      return r;
+    },
+  };
+  return { runner, calls: base.calls };
+}
+
+async function applyError(home: string, lies: Lies): Promise<AgentdError> {
+  const { runner } = lyingClaudeRunner(home, lies);
+  const err = await createClaudeAdapter({ home, runner })
+    .apply(desired)
+    .catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(AgentdError);
+  expect((err as AgentdError).code).toBe('cli_error');
+  return err as AgentdError;
 }
 
 describe('claude adapter', () => {
@@ -178,6 +224,48 @@ describe('claude adapter', () => {
     expect(err).toBeInstanceOf(AgentdError);
     expect((err as AgentdError).code).toBe('cli_error');
     expect((err as AgentdError).message).toContain('remove omni-old');
+  });
+
+  describe('verifies ~/.claude.json after the CLI reports success (D4)', () => {
+    it('fails with cli_error when add-json exits 0 but the entry never reaches mcpServers', async () => {
+      const err = await applyError(home, { forgetAdd: 'omni-new' });
+      expect(err.message).toContain(claudeConfigPath(home));
+      expect(err.message).toContain('omni-new is missing from mcpServers');
+      expect(err.message).not.toContain('omni-noauto');
+      // 확인되지 않았으므로 자동 승인도 쓰지 않았다
+      expect(await readOrUndefined(claudeSettingsPath(home))).toBe(SETTINGS);
+
+      // 정상 CLI 로 다시 적용하면 빠진 항목만 CLI 로 추가하고, 미뤄 둔 권한(omni-changed)은 updated 로 맞춘다
+      const { runner, calls } = fakeClaudeRunner(home);
+      const result = await createClaudeAdapter({ home, runner }).apply(desired);
+      expect(result).toEqual({ added: ['omni-new'], updated: ['omni-changed'], removed: [], unchanged: ['omni-keep', 'omni-noauto'] });
+      expect(argsOf(calls).map((a) => a.slice(0, 4))).toEqual([
+        ['claude', 'mcp', 'remove', 'omni-new'],
+        ['claude', 'mcp', 'add-json', 'omni-new'],
+      ]);
+      expect(await readOrUndefined(claudeSettingsPath(home))).toBe(SETTINGS_AFTER);
+    });
+
+    it('fails with cli_error when the stored entry has a different url', async () => {
+      const err = await applyError(home, { wrongUrl: 'omni-changed' });
+      expect(err.message).toContain(`omni-changed has url "${WRONG_URL}"`);
+      expect(err.message).toContain(`expected "${entry('changed').url}"`);
+      expect(await readOrUndefined(claudeSettingsPath(home))).toBe(SETTINGS);
+    });
+
+    it('fails with cli_error when remove exits 0 but the entry is still there', async () => {
+      const err = await applyError(home, { keepOnRemove: 'omni-old' });
+      expect(err.message).toContain('omni-old is still in mcpServers after claude mcp remove');
+      expect(await readOrUndefined(claudeSettingsPath(home))).toBe(SETTINGS);
+    });
+
+    it('names every mismatched entry in one error', async () => {
+      const err = await applyError(home, { forgetAdd: 'omni-noauto', wrongUrl: 'omni-new', keepOnRemove: 'omni-old' });
+      expect(err.message).toContain('omni-noauto is missing');
+      expect(err.message).toContain('omni-new has url');
+      expect(err.message).toContain('omni-old is still in mcpServers');
+      expect(err.message).not.toContain('omni-changed');
+    });
   });
 
   it('refuses to touch a broken settings.json', async () => {

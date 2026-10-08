@@ -1,7 +1,7 @@
 /**
  * Claude Code 어댑터 (설계 12.3, 12.7).
  * - 서버 항목: user scope `~/.claude.json`의 `mcpServers`. Claude Code 자신이 쓰는 파일이라 직접 편집하지 않고
- *   `claude mcp remove` / `claude mcp add-json --scope user` 로 바꾼다. 읽기는 diff 계산에만 쓴다.
+ *   `claude mcp remove` / `claude mcp add-json --scope user` 로 바꾼다. 읽기는 diff 계산과 적용 뒤 확인(D4)에만 쓴다.
  * - 자동 승인: `~/.claude/settings.json` → `permissions.allow`의 `mcp__omni-<id>`. 주석을 보존하며 부분 편집한다.
  */
 import path from 'node:path';
@@ -164,6 +164,26 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): Adapter {
     throw new AgentdError('cli_error', `claude mcp add-json ${entry.name} failed (exit ${r.code ?? 'none'}): ${r.output}`);
   }
 
+  /**
+   * CLI 가 exit 0 을 돌려줘도 실제로 반영됐는지 ~/.claude.json 을 다시 읽어 확인한다 (D4, 확인[P2]).
+   * Claude Code 는 실행 중인 세션이 이 파일을 통째로 다시 쓰기도 하므로 변경이 사라질 수 있다.
+   * 추가·수정한 항목은 최상위 mcpServers 에 있고 url 이 같아야 하며, 지운 항목은 없어야 한다.
+   */
+  async function verifyApplied(writes: DesiredEntry[], removes: string[]): Promise<void> {
+    if (writes.length === 0 && removes.length === 0) return;
+    const servers = await readServers();
+    const problems: string[] = [];
+    for (const entry of writes) {
+      const cur = servers.get(entry.name);
+      if (cur === undefined) problems.push(`${entry.name} is missing from mcpServers after claude mcp add-json`);
+      else if (cur.url !== entry.url) problems.push(`${entry.name} has url ${JSON.stringify(cur.url)} after claude mcp add-json (expected ${JSON.stringify(entry.url)})`);
+    }
+    for (const name of removes) {
+      if (servers.has(name)) problems.push(`${name} is still in mcpServers after claude mcp remove`);
+    }
+    if (problems.length > 0) throw new AgentdError('cli_error', `${configPath} does not reflect the claude mcp changes: ${problems.join('; ')}`);
+  }
+
   async function writeSettings(state: SettingsState, add: string[], remove: string[]): Promise<void> {
     if (add.length === 0 && remove.length === 0) return;
     let text = state.text;
@@ -200,6 +220,8 @@ export function createClaudeAdapter(opts: ClaudeAdapterOptions): Adapter {
       for (const name of p.cliRemoves) {
         await cliRemove(name, true);
       }
+      // 반영이 확인되지 않으면 자동 승인(settings.json)도 쓰지 않는다
+      await verifyApplied(p.cliWrites, p.cliRemoves);
       await writeSettings(p.settings, p.allowAdd, p.allowRemove);
       return p.plan;
     },
