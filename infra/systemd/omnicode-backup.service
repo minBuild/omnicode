@@ -1,0 +1,30 @@
+# OmniCode registry backup (design 17.4): VACUUM INTO snapshot + S3 upload + retention of 14.
+# Triggered by omnicode-backup.timer; run manually with `systemctl start omnicode-backup.service`.
+# Runs as omnicode because /var/lib/omnicode is 0700 omnicode. Uses the instance role for S3.
+[Unit]
+Description=OmniCode registry backup (VACUUM INTO + S3)
+Documentation=file:///opt/omnicode/docs/design/0001-mcp-management.md
+Wants=network-online.target
+After=network-online.target omnicode.service
+
+[Service]
+Type=oneshot
+User=omnicode
+Group=omnicode
+EnvironmentFile=/etc/omnicode/omnicode.env
+ExecStart=/usr/local/sbin/omnicode-backup
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/omnicode
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

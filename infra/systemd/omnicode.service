@@ -1,0 +1,51 @@
+# OmniCode API + MCP Hub (design 17.1). Installed to /etc/systemd/system by infra/install/mcp-feature.sh.
+# Runs as the trusted `omnicode` user: the only process that touches secrets and the registry DB.
+[Unit]
+Description=OmniCode API and MCP Hub
+Documentation=file:///opt/omnicode/docs/design/0001-mcp-management.md
+Wants=network-online.target
+After=network-online.target omnicode-agentd.service omnicode-imds-guard.service
+Requires=omnicode-agentd.service omnicode-imds-guard.service
+
+[Service]
+Type=simple
+User=omnicode
+Group=omnicode
+# omniagent group only so the API can traverse /run/omnicode and connect to agentd.sock.
+# RuntimeDirectory= in omnicode-agentd.service re-owns /run/omnicode to omniagent:omniagent on every
+# start, and omniagent is deliberately not a member of group omnicode (it would gain read access to
+# /etc/omnicode/omnicode.env). /home/omniagent is 0700, so this grants the API nothing else.
+SupplementaryGroups=omniagent
+EnvironmentFile=/etc/omnicode/omnicode.env
+WorkingDirectory=/opt/omnicode
+ExecStart=/usr/bin/node /opt/omnicode/packages/api/dist/main.js
+Restart=always
+RestartSec=2
+StateDirectory=omnicode
+StateDirectoryMode=0700
+UMask=0077
+
+# Hardening. Only /var/lib/omnicode is writable; /home is invisible; no new privileges or capabilities.
+# (If OMNICODE_API_PORT is ever < 1024, add AmbientCapabilities=CAP_NET_BIND_SERVICE here.)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/omnicode
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OmniCode MCP server preset",
+  "description": "One presets/<id>.json per upstream MCP server. Mirrors PresetSchema in packages/shared/src/schemas.ts; validated in CI by scripts/validate-presets.mjs (design 16.7).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "displayName", "transport", "url", "auth"],
+  "properties": {
+    "id": {
+      "description": "Must equal the file name without .json.",
+      "type": "string",
+      "pattern": "^[a-z0-9-]{1,40}$"
+    },
+    "displayName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 400
+    },
+    "transport": {
+      "description": "A hint only; the Hub follows what it detects (streamable_http is also tried for legacy sse servers).",
+      "enum": ["streamable_http", "sse"]
+    },
+    "url": {
+      "description": "https only. The hostname must be a public DNS name: no IP literals, no localhost, no dot-less names (design 16.2). Shown in full to the user before the server is added.",
+      "type": "string",
+      "pattern": "^https://[^/?#\\s]+",
+      "maxLength": 2048
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["none", "header", "oauth"]
+        },
+        "headerName": {
+          "description": "For type=header: the header the user's key is sent in (the key itself is entered in the UI and stored in Secrets Manager).",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]{1,64}$"
+        },
+        "scopes": {
+          "description": "For type=oauth: scopes to request when the server's metadata does not say.",
+          "type": "array",
+          "maxItems": 50,
+          "items": { "type": "string", "minLength": 1, "maxLength": 100 }
+        }
+      }
+    },
+    "docs": {
+      "description": "https link to the server's documentation; shown next to the URL.",
+      "type": "string",
+      "pattern": "^https://[^/?#\\s]+",
+      "maxLength": 2048
+    },
+    "defaultAgents": {
+      "description": "Agents pre-selected in the add dialog.",
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": { "enum": ["claude", "codex", "gemini"] }
+    }
+  }
+}

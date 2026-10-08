@@ -1,0 +1,3 @@
+# Presets are a supply-chain surface (design 16.7): nothing under /presets/ merges without the
+# owner's review. Enable "Require review from Code Owners" on the main branch protection rule.
+/presets/ @minBuild

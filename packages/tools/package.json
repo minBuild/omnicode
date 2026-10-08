@@ -1,0 +1,11 @@
+{
+  "name": "@omnicode/tools",
+  "version": "0.1.0",
+  "private": true,
+  "description": "작은 실행 파일 모음. omnicode-hub-headers = Claude Code headersHelper (설계 12.3).",
+  "bin": { "omnicode-hub-headers": "./bin/omnicode-hub-headers" },
+  "files": ["bin"],
+  "scripts": {
+    "test": "bash test/headers.test.sh"
+  }
+}

@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build, test, validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck and build (tsc -b)
+        run: npx tsc -b
+
+      - name: Unit tests
+        run: npx vitest run
+
+      - name: Validate presets (design 16.7)
+        run: npm run validate:presets
+
+      - name: Headers helper tests
+        run: npm test --workspace @omnicode/tools
+
+      - name: Build web
+        run: |
+          if [ -f packages/web/package.json ]; then
+            npm run build --workspace @omnicode/web
+          else
+            echo "packages/web not present; skipping"
+          fi
+
+      - name: Shell syntax (sh -n / bash -n)
+        run: |
+          sh -n packages/tools/bin/omnicode-hub-headers infra/bin/omnicode-imds-guard infra/bin/omnicode-backup
+          bash -n packages/tools/test/headers.test.sh infra/install/mcp-feature.sh
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning -s sh packages/tools/bin/omnicode-hub-headers infra/bin/omnicode-imds-guard infra/bin/omnicode-backup
+            shellcheck -S warning packages/tools/test/headers.test.sh infra/install/mcp-feature.sh
+          fi

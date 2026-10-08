@@ -1,0 +1,57 @@
+# OmniCode agent daemon (design 12.2, 17.1). Installed by infra/install/mcp-feature.sh.
+# Runs as the untrusted-side `omniagent` user: edits agent CLI config files, writes token files,
+# runs `claude mcp ...`. It talks to the Hub only through /run/omnicode/agentd.sock.
+#
+# Ownership note: RuntimeDirectory= creates /run/omnicode as omniagent:omniagent 0750 at every start
+# (an existing directory with another group is re-owned, see systemd.exec(5)). The daemon creates the
+# socket and applies chmod 0660. omnicode.service carries SupplementaryGroups=omniagent so the API can
+# connect; a chgrp to OMNICODE_AGENTD_GROUP by the daemon is optional and fails harmlessly with EPERM
+# because omniagent is not a member of group omnicode (P10).
+[Unit]
+Description=OmniCode agent daemon (agentd)
+Documentation=file:///opt/omnicode/docs/design/0001-mcp-management.md
+After=network.target omnicode-imds-guard.service
+Before=omnicode.service
+
+[Service]
+Type=simple
+User=omniagent
+Group=omniagent
+SupplementaryGroups=
+Environment=OMNICODE_AGENTD_SOCKET=/run/omnicode/agentd.sock
+Environment=HOME=/home/omniagent
+WorkingDirectory=/home/omniagent
+ExecStart=/usr/bin/node /opt/omnicode/packages/agentd/dist/main.js
+RuntimeDirectory=omnicode
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+Restart=always
+RestartSec=2
+# Nothing this daemon (or a CLI it spawns) creates is ever world-accessible; group access stays
+# available for the socket (omniagent group = the daemon itself plus omnicode.service).
+UMask=0007
+
+# Hardening. Only the agent home and the socket directory are writable. Do not add
+# EnvironmentFile=/etc/omnicode/omnicode.env here: systemd reads it as root and the values would
+# leak into every agent CLI this daemon spawns.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/home/omniagent /run/omnicode
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

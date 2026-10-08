@@ -1,0 +1,10 @@
+{
+  "id": "fish-audio",
+  "displayName": "Fish Audio",
+  "description": "음성 생성, 보이스 검색, 음성 인식",
+  "transport": "streamable_http",
+  "url": "https://api.fish.audio/mcp",
+  "auth": { "type": "oauth" },
+  "docs": "https://docs.fish.audio/overview/mcp",
+  "defaultAgents": ["claude", "codex", "gemini"]
+}

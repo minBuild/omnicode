@@ -1,0 +1,127 @@
+#!/bin/sh
+# omnicode-imds-guard: iptables owner rules that keep the `omniagent` user away from the EC2 instance
+# metadata service and the local OmniCode API port (design 17.2). Installed to /usr/local/sbin and
+# run at boot by omnicode-imds-guard.service; safe to run by hand as root at any time.
+#
+#   omnicode-imds-guard            insert the rules that are missing (idempotent), then print them
+#   omnicode-imds-guard --remove   delete the rules (all duplicates), then print what is left
+#   omnicode-imds-guard --help
+#
+# Rules (inserted at the top of the OUTPUT chain):
+#   iptables  -I OUTPUT -d 169.254.169.254 -m owner --uid-owner omniagent -j REJECT
+#   ip6tables -I OUTPUT -d fd00:ec2::254   -m owner --uid-owner omniagent -j REJECT
+#   iptables  -I OUTPUT -o lo -p tcp --dport <OMNICODE_API_PORT> -m owner --uid-owner omniagent -j REJECT
+#
+# OMNICODE_API_PORT is taken from the environment, else from /etc/omnicode/omnicode.env (parsed, never
+# sourced), else 8080. Hub port 7410 is intentionally left open for omniagent.
+set -eu
+
+ENV_FILE="${OMNICODE_ENV_FILE:-/etc/omnicode/omnicode.env}"
+AGENT_USER="${OMNICODE_AGENT_USER:-omniagent}"
+IMDS_V4="169.254.169.254"
+IMDS_V6="fd00:ec2::254"
+IPT="${IPTABLES:-iptables}"
+IP6T="${IP6TABLES:-ip6tables}"
+
+usage() {
+  sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+die() {
+  printf 'omnicode-imds-guard: %s\n' "$*" >&2
+  exit 1
+}
+
+# Value of KEY from the env file: last assignment wins, surrounding quotes stripped, nothing executed.
+env_file_value() {
+  key="$1"
+  [ -r "$ENV_FILE" ] || return 0
+  v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$ENV_FILE" | tail -n 1)"
+  v="${v%%#*}"
+  v="$(printf '%s' "$v" | sed 's/[[:space:]]*$//')"
+  case "$v" in
+    \"*\") v="${v#\"}"; v="${v%\"}" ;;
+    \'*\') v="${v#\'}"; v="${v%\'}" ;;
+  esac
+  printf '%s' "$v"
+}
+
+api_port() {
+  port="${OMNICODE_API_PORT:-}"
+  [ -n "$port" ] || port="$(env_file_value OMNICODE_API_PORT)"
+  [ -n "$port" ] || port=8080
+  case "$port" in
+    *[!0-9]*|'') die "OMNICODE_API_PORT must be a number, got '$port'" ;;
+  esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || die "OMNICODE_API_PORT out of range: $port"
+  printf '%s' "$port"
+}
+
+# rule_present <iptables-bin> <rule args...>
+rule_present() {
+  bin="$1"; shift
+  "$bin" -C OUTPUT "$@" 2>/dev/null
+}
+
+# ensure_rule <iptables-bin> <rule args...>  -- insert at the top of OUTPUT unless already present
+ensure_rule() {
+  bin="$1"; shift
+  if rule_present "$bin" "$@"; then
+    printf 'present: %s -I OUTPUT %s\n' "$bin" "$*"
+  else
+    "$bin" -I OUTPUT "$@"
+    printf 'added:   %s -I OUTPUT %s\n' "$bin" "$*"
+  fi
+}
+
+# remove_rule <iptables-bin> <rule args...>  -- delete every copy of the rule
+remove_rule() {
+  bin="$1"; shift
+  n=0
+  while rule_present "$bin" "$@"; do
+    "$bin" -D OUTPUT "$@"
+    n=$((n + 1))
+  done
+  if [ "$n" -gt 0 ]; then
+    printf 'removed: %s -D OUTPUT %s (x%s)\n' "$bin" "$*" "$n"
+  else
+    printf 'absent:  %s -D OUTPUT %s\n' "$bin" "$*"
+  fi
+}
+
+show_rules() {
+  printf -- '--- OUTPUT rules with an owner match (%s)\n' "$IPT"
+  "$IPT" -S OUTPUT | grep -- '-m owner' || printf '(none)\n'
+  printf -- '--- OUTPUT rules with an owner match (%s)\n' "$IP6T"
+  "$IP6T" -S OUTPUT | grep -- '-m owner' || printf '(none)\n'
+}
+
+main() {
+  mode=apply
+  for arg in "$@"; do
+    case "$arg" in
+      --remove) mode=remove ;;
+      -h|--help) usage; exit 0 ;;
+      *) usage >&2; die "unknown argument: $arg" ;;
+    esac
+  done
+
+  [ "$(id -u)" -eq 0 ] || die "must run as root"
+  command -v "$IPT" >/dev/null 2>&1 || die "$IPT not found (install iptables / iptables-nft)"
+  command -v "$IP6T" >/dev/null 2>&1 || die "$IP6T not found (install iptables / iptables-nft)"
+  id -u "$AGENT_USER" >/dev/null 2>&1 || die "user $AGENT_USER does not exist"
+
+  port="$(api_port)"
+  if [ "$mode" = apply ]; then
+    ensure_rule "$IPT"  -d "$IMDS_V4" -m owner --uid-owner "$AGENT_USER" -j REJECT
+    ensure_rule "$IP6T" -d "$IMDS_V6" -m owner --uid-owner "$AGENT_USER" -j REJECT
+    ensure_rule "$IPT"  -o lo -p tcp --dport "$port" -m owner --uid-owner "$AGENT_USER" -j REJECT
+  else
+    remove_rule "$IPT"  -d "$IMDS_V4" -m owner --uid-owner "$AGENT_USER" -j REJECT
+    remove_rule "$IP6T" -d "$IMDS_V6" -m owner --uid-owner "$AGENT_USER" -j REJECT
+    remove_rule "$IPT"  -o lo -p tcp --dport "$port" -m owner --uid-owner "$AGENT_USER" -j REJECT
+  fi
+  show_rules
+}
+
+main "$@"

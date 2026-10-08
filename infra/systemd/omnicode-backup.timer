@@ -1,0 +1,12 @@
+# Daily trigger for omnicode-backup.service (design 17.4). Enable with `systemctl enable --now omnicode-backup.timer`.
+[Unit]
+Description=Daily OmniCode registry backup
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+Unit=omnicode-backup.service
+
+[Install]
+WantedBy=timers.target

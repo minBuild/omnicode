@@ -1,0 +1,39 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OmniCodeSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:PutSecretValue",
+        "secretsmanager:CreateSecret",
+        "secretsmanager:DeleteSecret",
+        "secretsmanager:DescribeSecret",
+        "secretsmanager:TagResource"
+      ],
+      "Resource": "arn:aws:secretsmanager:*:*:secret:omnicode/*"
+    },
+    {
+      "Sid": "OmniCodeBackupList",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::__OMNICODE_BACKUP_BUCKET__"
+    },
+    {
+      "Sid": "OmniCodeBackupWrite",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::__OMNICODE_BACKUP_BUCKET__/*",
+      "Condition": {
+        "StringEquals": { "s3:x-amz-server-side-encryption": "AES256" }
+      }
+    },
+    {
+      "Sid": "OmniCodeBackupPrune",
+      "Effect": "Allow",
+      "Action": "s3:DeleteObject",
+      "Resource": "arn:aws:s3:::__OMNICODE_BACKUP_BUCKET__/*"
+    }
+  ]
+}

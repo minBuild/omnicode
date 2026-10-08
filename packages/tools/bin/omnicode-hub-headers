@@ -1,0 +1,37 @@
+#!/bin/sh
+# Claude Code headersHelper for OmniCode Hub entries (design 12.3).
+#
+# Prints exactly one JSON object on stdout and nothing else:
+#   {"Authorization":"Bearer <token>","X-OmniCode-Job":"<job>"}
+#
+# - <token> is read from $HOME/.omnicode/tokens/claude (one line, written by agentd, mode 0600).
+#   It must start with "omh_" and contain only [A-Za-z0-9_-]; otherwise "{}" is printed and the
+#   exit status is 1, so Claude Code sends no credentials.
+# - <job> comes from OMNICODE_JOB_ID and is blanked unless it contains only [A-Za-z0-9_-]
+#   (the Hub validates it as [A-Za-z0-9_-]{1,64}).
+# Both values are restricted to a charset that needs no JSON escaping.
+# Claude Code runs this from the registered absolute path with a 10 second limit.
+set -eu
+
+fail() {
+  printf '{}\n'
+  exit 1
+}
+
+[ -n "${HOME:-}" ] || fail
+tok="$(cat "$HOME/.omnicode/tokens/claude" 2>/dev/null)" || fail
+
+case "$tok" in
+  omh_?*) ;;
+  *) fail ;;
+esac
+case "${tok#omh_}" in
+  *[!A-Za-z0-9_-]*) fail ;;
+esac
+
+job="${OMNICODE_JOB_ID:-}"
+case "$job" in
+  *[!A-Za-z0-9_-]*) job="" ;;
+esac
+
+printf '{"Authorization":"Bearer %s","X-OmniCode-Job":"%s"}\n' "$tok" "$job"

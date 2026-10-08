@@ -1,0 +1,20 @@
+# OmniCode network isolation for the omniagent user (design 17.2). Installed by infra/install/mcp-feature.sh.
+# Inserts iptables/ip6tables owner rules so omniagent cannot reach EC2 IMDS (169.254.169.254,
+# fd00:ec2::254) or the local OmniCode API port. The rules live only in the kernel; this unit is how
+# they are persisted across reboots. The service stays "active" after the oneshot so that
+# omnicode-agentd.service / omnicode.service can order After= and Requires= it.
+[Unit]
+Description=OmniCode: block omniagent from EC2 IMDS and the local API port (iptables owner rules)
+Documentation=file:///opt/omnicode/docs/design/0001-mcp-management.md
+Wants=network-pre.target
+After=network-pre.target
+Before=omnicode-agentd.service omnicode.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/omnicode-imds-guard
+ExecStop=/usr/local/sbin/omnicode-imds-guard --remove
+
+[Install]
+WantedBy=multi-user.target
