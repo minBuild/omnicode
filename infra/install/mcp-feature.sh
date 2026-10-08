@@ -15,7 +15,7 @@
 #   1. users: omnicode (system, nologin, home /var/lib/omnicode), omniagent (bash, /home/omniagent 0700)
 #   2. directories with the ownership/modes of design 8.2; /etc/omnicode/omnicode.env from .env.example
 #      (created once, never overwritten; --public-url / --backup-bucket set single keys)
-#   3. systemd units + tmpfiles + /usr/local/sbin scripts + /usr/local/bin/omnicode-hub-headers; enable units;
+#   3. systemd units (incl. omnicode-agentd.socket) + /usr/local/sbin scripts + omnicode-hub-headers; enable units;
 #      iptables rules are persisted by omnicode-imds-guard.service
 #   4. aws ec2 modify-instance-metadata-options --http-tokens required --http-put-response-hop-limit 1
 #   5. IAM instance role policy: printed (cannot be attached from inside the instance)
@@ -34,7 +34,8 @@ set -euo pipefail
 : "${OMNICODE_DATA_DIR:=/var/lib/omnicode}"
 : "${OMNIAGENT_HOME:=/home/omniagent}"
 : "${SYSTEMD_UNIT_DIR:=/etc/systemd/system}"
-: "${TMPFILES_DIR:=/etc/tmpfiles.d}"
+: "${TMPFILES_DIR:=/etc/tmpfiles.d}"           # only to remove the pre-socket-activation omnicode.conf
+: "${OMNICODE_RUN_DIR:=/run/omnicode}"        # agentd socket directory, created by omnicode-agentd.socket
 : "${SBIN_DIR:=/usr/local/sbin}"
 : "${BIN_DIR:=/usr/local/bin}"
 
@@ -45,7 +46,7 @@ PUBLIC_URL=""
 BACKUP_BUCKET=""
 # shellcheck disable=SC2016  # $HOME must stay literal: the line is written into omniagent's shell profiles
 ENV_SOURCE_LINE='[ -f "$HOME/.omnicode/env.sh" ] && . "$HOME/.omnicode/env.sh"'
-UNITS=(omnicode.service omnicode-agentd.service omnicode-imds-guard.service omnicode-backup.service omnicode-backup.timer)
+UNITS=(omnicode.service omnicode-agentd.socket omnicode-agentd.service omnicode-imds-guard.service omnicode-backup.service omnicode-backup.timer)
 
 log()  { printf '[mcp-feature] %s\n' "$*"; }
 warn() { printf '[mcp-feature] WARNING: %s\n' "$*" >&2; }
@@ -203,12 +204,41 @@ install_files() {
   for u in "${UNITS[@]}"; do
     install_file "$SRC_DIR/infra/systemd/$u" "$SYSTEMD_UNIT_DIR/$u" 0644
   done
-  install_file "$SRC_DIR/infra/tmpfiles.d/omnicode.conf" "$TMPFILES_DIR/omnicode.conf" 0644
   install_file "$SRC_DIR/infra/bin/omnicode-imds-guard" "$SBIN_DIR/omnicode-imds-guard" 0755
   install_file "$SRC_DIR/infra/bin/omnicode-backup" "$SBIN_DIR/omnicode-backup" 0755
   install_file "$SRC_DIR/packages/tools/bin/omnicode-hub-headers" "$BIN_DIR/omnicode-hub-headers" 0755
-  systemd-tmpfiles --create "$TMPFILES_DIR/omnicode.conf"
+  retire_agentd_runtime_dir
   systemctl daemon-reload
+}
+
+# The agentd socket and its directory now come from omnicode-agentd.socket (socket activation, D7/P10):
+# /run/omnicode root:root 0755 (DirectoryMode=), agentd.sock omniagent:omnicode 0660. Undo what earlier
+# versions set up: the tmpfiles entry, and the omniagent:omniagent 0750 directory left by RuntimeDirectory=,
+# which omnicode.service can no longer traverse now that it has no SupplementaryGroups=omniagent.
+retire_agentd_runtime_dir() {
+  if [ -e "$TMPFILES_DIR/omnicode.conf" ]; then
+    rm -f "$TMPFILES_DIR/omnicode.conf"
+    log "tmpfiles: removed $TMPFILES_DIR/omnicode.conf (omnicode-agentd.socket creates $OMNICODE_RUN_DIR)"
+  fi
+  if [ -d "$OMNICODE_RUN_DIR" ]; then
+    chown root:root "$OMNICODE_RUN_DIR"
+    chmod 0755 "$OMNICODE_RUN_DIR"
+  fi
+}
+
+# A daemon started before socket activation created the socket itself and unlinks that path when it exits,
+# so it must be stopped before omnicode-agentd.socket binds the same path.
+start_agentd_socket() {
+  if systemctl is-active --quiet omnicode-agentd.socket; then
+    log "agentd socket: active"
+    return
+  fi
+  if systemctl is-active --quiet omnicode-agentd.service; then
+    systemctl stop omnicode-agentd.service
+    log "agentd: stopped the daemon that predates socket activation"
+  fi
+  systemctl start omnicode-agentd.socket
+  log "agentd socket: started ($OMNICODE_RUN_DIR/agentd.sock, omniagent:omnicode 0660)"
 }
 
 enable_services() {
@@ -221,10 +251,11 @@ enable_services() {
   if [ "$START_SERVICES" = 1 ]; then
     [ -f "$OMNICODE_REPO_DIR/packages/agentd/dist/main.js" ] && [ -f "$OMNICODE_REPO_DIR/packages/api/dist/main.js" ] \
       || die "--start: build output not found under $OMNICODE_REPO_DIR (run: npm ci && npm run build)"
+    start_agentd_socket
     systemctl restart omnicode-agentd.service omnicode.service
     log "services: omnicode-agentd and omnicode (re)started"
   else
-    log "services: enabled, not started (build first, then: systemctl restart omnicode-agentd omnicode; or re-run with --start)"
+    log "services: enabled, not started (build first, then re-run with --start; or: systemctl stop omnicode-agentd && systemctl restart omnicode-agentd.socket omnicode-agentd omnicode)"
   fi
 }
 

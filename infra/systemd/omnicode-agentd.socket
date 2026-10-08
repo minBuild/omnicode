@@ -1,0 +1,23 @@
+# OmniCode agent daemon socket (design 8.2, 12.2, 17.1; handoff D7/P10). Installed by infra/install/mcp-feature.sh.
+# systemd creates /run/omnicode/agentd.sock as omniagent:omnicode 0660 and passes it to
+# omnicode-agentd.service as fd 3 (socket activation, sd_listen_fds(3)). The daemon only accepts on it:
+# it never creates, chmods, chgrps or removes the file. Only members of group omnicode (omnicode.service)
+# can connect, so neither omniagent nor the API needs a supplementary group of the other side.
+# Connections made while the daemon is (re)starting wait in the listen queue instead of failing.
+[Unit]
+Description=OmniCode agent daemon socket (agentd)
+Documentation=file:///opt/omnicode/docs/design/0001-mcp-management.md
+
+[Socket]
+ListenStream=/run/omnicode/agentd.sock
+SocketUser=omniagent
+SocketGroup=omnicode
+SocketMode=0660
+# /run/omnicode is created by systemd (root:root) when missing; the socket mode above is what protects it.
+DirectoryMode=0755
+RemoveOnStop=yes
+# One long-running daemon accepts every connection itself (no per-connection instances).
+Accept=no
+
+[Install]
+WantedBy=sockets.target

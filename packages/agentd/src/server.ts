@@ -2,6 +2,11 @@
  * agentd 소켓 서버 (설계 12.2, 17.1).
  * `omniagent` 사용자로 실행되어 Unix 소켓에서 줄 단위 JSON 요청을 받는다. 인증은 소켓 권한뿐이다
  * (`omniagent:omnicode` 0660). 모든 입력은 zod 로 검증하고, 에이전트 홈 안의 허용된 파일만 건드린다.
+ *
+ * 소켓은 두 가지로 연다 (D7, P10).
+ * - systemd 소켓 활성화(운영): `omnicode-agentd.socket` 이 소켓을 만들고 소유·권한(SocketUser/SocketGroup/SocketMode)을
+ *   정한 뒤 fd 3 으로 넘긴다. agentd 는 그 fd 에서 듣기만 하고 파일은 지우지도 chmod·chgrp 하지도 않는다.
+ * - 경로(개발·테스트): agentd 가 직접 만들고 0660 + 가능하면 chgrp.
  */
 import { promises as fs } from 'node:fs';
 import net from 'node:net';
@@ -27,7 +32,10 @@ export interface StartAgentdOptions {
   version: string;
   runner?: CommandRunner;
   logger?: AgentdLogger;
-  /** 소켓 파일의 그룹. 기본 `OMNICODE_AGENTD_GROUP` 또는 `omnicode`. null 이면 chown 생략 */
+  /**
+   * 소켓 파일의 그룹. 기본 `OMNICODE_AGENTD_GROUP` 또는 `omnicode`. null 이면 chown 생략.
+   * 경로로 열 때만 쓴다 (systemd 소켓 활성화에서는 .socket 유닛의 SocketGroup 이 정한다).
+   */
   group?: string | null;
   /** 어댑터 덮어쓰기 (테스트용) */
   adapters?: Partial<Record<Agent, Adapter>>;
@@ -49,12 +57,34 @@ export function createConsoleLogger(stream: { write(s: string): unknown } = proc
 
 const silentLogger: AgentdLogger = { info() {}, warn() {}, error() {} };
 
+/** sd_listen_fds(3): systemd 가 넘기는 첫 fd 번호 (SD_LISTEN_FDS_START) */
+export const SD_LISTEN_FDS_START = 3;
+
+/** 어디서 들을지: systemd 가 넘긴 fd, 또는 agentd 가 직접 만드는 소켓 경로 */
+export type ListenTarget = { kind: 'systemd'; fd: number } | { kind: 'path'; path: string };
+
+/**
+ * systemd 소켓 활성화로 실행됐는지 판정한다 (D7, 순수 함수).
+ * sd_listen_fds(3) 규약: `LISTEN_PID` 가 이 프로세스의 pid 이고 `LISTEN_FDS` ≥ 1 이면 fd 3 부터가 넘겨받은 소켓이다.
+ * `LISTEN_PID` 가 다르면 부모에게 온 값이 새어 들어온 것이므로 무시한다. 소켓은 하나만 쓴다 (첫 fd).
+ */
+export function resolveListenTarget(env: Readonly<Record<string, string | undefined>>, pid: number, socketPath: string): ListenTarget {
+  const listenPid = env['LISTEN_PID'];
+  const listenFds = env['LISTEN_FDS'];
+  const isCount = (v: string | undefined): v is string => v !== undefined && /^\d+$/.test(v);
+  if (isCount(listenPid) && Number(listenPid) === pid && isCount(listenFds) && Number(listenFds) >= 1) {
+    return { kind: 'systemd', fd: SD_LISTEN_FDS_START };
+  }
+  return { kind: 'path', path: socketPath };
+}
+
 export async function startAgentd(opts: StartAgentdOptions): Promise<AgentdHandle> {
   const logger = opts.logger ?? silentLogger;
   const runner = opts.runner ?? createExecFileRunner();
   const adapters: Record<Agent, Adapter> = { ...createAdapters({ home: opts.home, runner }), ...opts.adapters };
   const tracker = new StatusTracker({ version: opts.version, home: opts.home, runner });
   const group = opts.group === undefined ? process.env['OMNICODE_AGENTD_GROUP'] || DEFAULT_SOCKET_GROUP : opts.group;
+  const target = resolveListenTarget(process.env, process.pid, opts.socketPath);
 
   // 파일을 쓰는 작업은 한 번에 하나만 (연결이 여러 개여도)
   let chain: Promise<unknown> = Promise.resolve();
@@ -162,20 +192,31 @@ export async function startAgentd(opts: StartAgentdOptions): Promise<AgentdHandl
     });
   }
 
-  await removeStaleSocket(opts.socketPath, logger);
-  await fs.mkdir(path.dirname(opts.socketPath), { recursive: true, mode: 0o750 }).catch(() => undefined);
+  if (target.kind === 'path') {
+    await removeStaleSocket(target.path, logger);
+    await fs.mkdir(path.dirname(target.path), { recursive: true, mode: 0o750 }).catch(() => undefined);
+  } else {
+    // sd_listen_fds(3) 의 unset_environment: agentd 가 실행하는 CLI 에 넘기지 않는다
+    delete process.env['LISTEN_PID'];
+    delete process.env['LISTEN_FDS'];
+    delete process.env['LISTEN_FDNAMES'];
+  }
 
   const server = net.createServer(onConnection);
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen({ path: opts.socketPath }, () => {
+    server.listen(target.kind === 'systemd' ? { fd: target.fd } : { path: target.path }, () => {
       server.off('error', reject);
       resolve();
     });
   });
   server.on('error', (e) => logger.error({ err: e.message }, 'server error'));
-  await applySocketPermissions(opts.socketPath, group, logger);
-  logger.info({ socketPath: opts.socketPath, home: opts.home, version: opts.version }, 'agentd listening');
+  // systemd 소켓의 소유·권한은 .socket 유닛이 정한다 (여기서 바꾸지 않는다)
+  if (target.kind === 'path') await applySocketPermissions(target.path, group, logger);
+  logger.info(
+    { socketPath: opts.socketPath, systemd: target.kind === 'systemd', home: opts.home, version: opts.version },
+    'agentd listening',
+  );
 
   let closed = false;
   return {
@@ -185,7 +226,8 @@ export async function startAgentd(opts: StartAgentdOptions): Promise<AgentdHandl
       closed = true;
       for (const s of sockets) s.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await fs.rm(opts.socketPath, { force: true }).catch(() => undefined);
+      // systemd 소켓 파일은 systemd 것이다 (RemoveOnStop). 넘겨받은 fd 를 닫아도 systemd 가 계속 들고 있다.
+      if (target.kind === 'path') await fs.rm(target.path, { force: true }).catch(() => undefined);
     },
   };
 }
@@ -213,7 +255,7 @@ async function removeStaleSocket(socketPath: string, logger: AgentdLogger): Prom
   logger.warn({ socketPath }, 'removed stale socket');
 }
 
-/** 0660 + chgrp (17.1). 그룹을 찾을 수 없거나(macOS·테스트) 권한이 없으면 조용히 넘어간다. */
+/** 경로로 열었을 때만: 0660 + chgrp (17.1). 그룹을 찾을 수 없거나(macOS·테스트) 권한이 없으면 조용히 넘어간다. */
 async function applySocketPermissions(socketPath: string, group: string | null, logger: AgentdLogger): Promise<void> {
   await fs.chmod(socketPath, 0o660);
   if (group === null || group === '') return;

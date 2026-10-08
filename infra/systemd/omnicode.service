@@ -4,18 +4,17 @@
 Description=OmniCode API and MCP Hub
 Documentation=file:///opt/omnicode/docs/design/0001-mcp-management.md
 Wants=network-online.target
-After=network-online.target omnicode-agentd.service omnicode-imds-guard.service
-Requires=omnicode-agentd.service omnicode-imds-guard.service
+# agentd is reached through omnicode-agentd.socket (socket activation, D7): the API depends on the socket,
+# not on the daemon process, so restarting agentd does not restart the API.
+After=network-online.target omnicode-agentd.socket omnicode-imds-guard.service
+Requires=omnicode-agentd.socket omnicode-imds-guard.service
 
 [Service]
 Type=simple
 User=omnicode
 Group=omnicode
-# omniagent group only so the API can traverse /run/omnicode and connect to agentd.sock.
-# RuntimeDirectory= in omnicode-agentd.service re-owns /run/omnicode to omniagent:omniagent on every
-# start, and omniagent is deliberately not a member of group omnicode (it would gain read access to
-# /etc/omnicode/omnicode.env). /home/omniagent is 0700, so this grants the API nothing else.
-SupplementaryGroups=omniagent
+# No supplementary groups: /run/omnicode/agentd.sock is omniagent:omnicode 0660 (omnicode-agentd.socket),
+# so the primary group omnicode is enough to connect, and omniagent stays out of group omnicode (7.1).
 EnvironmentFile=/etc/omnicode/omnicode.env
 WorkingDirectory=/opt/omnicode
 ExecStart=/usr/bin/node /opt/omnicode/packages/api/dist/main.js
