@@ -5,8 +5,16 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "scripts": { "build": "tsc -b", "test": "vitest run" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b && node ../../scripts/copy-migrations.mjs",
+    "test": "vitest run"
+  },
   "dependencies": {
     "@aws-sdk/client-secrets-manager": "^3.1147.0",
     "@modelcontextprotocol/sdk": "^1.32.1",

@@ -68,4 +68,4 @@ node packages/api/dist/main.js               # API :8080, Hub 127.0.0.1:7410
 
 ## 배포
 
-`infra/install/mcp-feature.sh` 가 사용자·디렉터리·systemd·iptables·IMDSv2 설정을 담당한다 (설계 17.6). CloudFront 공개 경로 두 개(`/.well-known/omnicode/client.json`, `/oauth/callback`)는 [`infra/cloudfront/README.md`](infra/cloudfront/README.md) 참고. 아직 Phase 0 검증 목록(설계 19.1)의 실제 CLI·EC2 항목은 수행 전이다.
+`infra/install/mcp-feature.sh` 가 사용자·디렉터리·systemd·iptables·IMDSv2 설정을 담당한다 (설계 17.6). 소스 빌드와 서비스 재시작은 `infra/bin/omnicode-deploy` 가 한다 (`npm ci` → `npm run build` → 웹 빌드 → `systemctl restart`). 에이전트 토큰은 `omnicode.service` 가 첫 기동 때 자동으로 만들어 agentd 를 통해 `/home/omniagent/.omnicode/tokens/` 에 쓴다. CloudFront 공개 경로 두 개(`/.well-known/omnicode/client.json`, `/oauth/callback`)는 [`infra/cloudfront/README.md`](infra/cloudfront/README.md) 참고. 아직 Phase 0 검증 목록(설계 19.1)의 실제 CLI·EC2 항목은 수행 전이다.

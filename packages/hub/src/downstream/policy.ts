@@ -62,7 +62,7 @@ export function authorizeCall(input: PolicyInput, toolName: string): ToolRecord 
 export function statusBadges(server: ServerRecord, tools: ToolRecord[]): string[] {
   const badges: string[] = [];
   if (server.status === 'needs_auth' && server.requested_scope && server.granted_scope && server.requested_scope !== server.granted_scope) {
-    badges.push('scope_upgrade');
+    badges.push('scope_stepup');
   }
   const changed = tools.filter((t) => t.approved_hash !== null && t.approved_hash !== t.schema_hash).length;
   const pending = tools.filter((t) => t.approved_hash === null).length;

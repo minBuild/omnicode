@@ -49,9 +49,9 @@ jobs:
 
       - name: Shell syntax (sh -n / bash -n)
         run: |
-          sh -n packages/tools/bin/omnicode-hub-headers infra/bin/omnicode-imds-guard infra/bin/omnicode-backup
+          sh -n packages/tools/bin/omnicode-hub-headers infra/bin/omnicode-imds-guard infra/bin/omnicode-backup infra/bin/omnicode-deploy
           bash -n packages/tools/test/headers.test.sh infra/install/mcp-feature.sh
           if command -v shellcheck >/dev/null 2>&1; then
-            shellcheck -S warning -s sh packages/tools/bin/omnicode-hub-headers infra/bin/omnicode-imds-guard infra/bin/omnicode-backup
+            shellcheck -S warning -s sh packages/tools/bin/omnicode-hub-headers infra/bin/omnicode-imds-guard infra/bin/omnicode-backup infra/bin/omnicode-deploy
             shellcheck -S warning packages/tools/test/headers.test.sh infra/install/mcp-feature.sh
           fi

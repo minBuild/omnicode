@@ -19,7 +19,7 @@
 #      iptables rules are persisted by omnicode-imds-guard.service
 #   4. aws ec2 modify-instance-metadata-options --http-tokens required --http-put-response-hop-limit 1
 #   5. IAM instance role policy: printed (cannot be attached from inside the instance)
-#   6. initial agent tokens: printed (`omnicode-server --init-tokens`, run by the API once agentd is up)
+#   6. initial agent tokens: created automatically by omnicode.service on first start (10.5); printed how to verify
 #   7. CloudFront public paths: printed (infra/cloudfront/README.md)
 #   8. omniagent shell profiles source ~/.omnicode/env.sh
 # Step 9 (Docker for stdio servers) is Phase 2 and not handled here.
@@ -289,12 +289,11 @@ Next steps (design 17.6)
      aws iam put-role-policy --role-name <instance-role> --policy-name omnicode-mcp \
        --policy-document file:///tmp/omnicode-iam.json
 
-6. Initial agent tokens (creates the omnicode/hub-tokens secret and pushes the three tokens to
-   agentd via tokens.write). Build first, start omnicode-agentd, then run the API once as omnicode:
-     systemd-run --wait --pipe --collect -p User=omnicode -p Group=omnicode \
-       -p EnvironmentFile=/etc/omnicode/omnicode.env \
-       /usr/bin/node /opt/omnicode/packages/api/dist/main.js --init-tokens
-   (equivalent to `omnicode-server --init-tokens` from /opt/omnicode/node_modules/.bin)
+6. Agent tokens — nothing to run. omnicode.service creates the three agent tokens on its first start,
+   stores them in Secrets Manager (<prefix>/hub-tokens) and hands copies to agentd, which writes
+   /home/omniagent/.omnicode/tokens/{claude,codex,gemini} (0600). Verify after the service is up:
+     sudo -u omniagent ls -l /home/omniagent/.omnicode/tokens
+   Rotate later from the web UI (Hub 상태 → Hub 토큰 재발급).
 
 7. CloudFront — add two public behaviors in front of the login wall (infra/cloudfront/README.md):
      /.well-known/omnicode/client.json   cache 1 hour (origin sends Cache-Control: public, max-age=3600)

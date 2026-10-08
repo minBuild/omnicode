@@ -4,10 +4,14 @@
   "private": true,
   "description": "OmniCode — personal agent workspace on your own AWS account. MCP management (design 0001).",
   "type": "module",
-  "engines": { "node": ">=22.13 <27" },
-  "workspaces": ["packages/*"],
+  "engines": {
+    "node": ">=22.13 <27"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node scripts/copy-migrations.mjs",
     "typecheck": "tsc -b --noEmit false --emitDeclarationOnly false || tsc -b",
     "test": "vitest run",
     "test:watch": "vitest",
