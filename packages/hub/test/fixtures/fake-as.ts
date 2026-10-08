@@ -5,6 +5,11 @@
  *
  * authorization_endpoint는 기본적으로 https://as.example/authorize 로 광고한다 (브라우저가 가는 곳이라
  * 테스트는 절대 fetch하지 않는다). 테스트는 `issueCode(authorizationUrl)`로 사용자의 로그인·동의를 흉내 낸다.
+ * 자기 오리진의 GET /authorize도 같은 검증 뒤 redirect_uri로 302한다 (noMetadata 모드의 기본 엔드포인트).
+ *
+ * 탐색 변형 (설계 10.3):
+ * - oidcOnly: AS 메타데이터를 OIDC discovery(/.well-known/openid-configuration)로만 낸다.
+ * - noMetadata: 2025-03-26 이전 서버. PRM·AS 메타데이터가 전혀 없고 기본 엔드포인트만 있다.
  */
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type ServerResponse } from 'node:http';
@@ -42,6 +47,19 @@ export interface FakeAsOptions {
   rotateRefreshTokens?: boolean;
   /** MCP 서버 경로 (기본 /mcp) */
   mcpPath?: string;
+  /** AS 메타데이터를 OIDC discovery로만 낸다 (RFC 8414 위치는 404). OIDC 필수 필드(jwks_uri 등)를 더한다 */
+  oidcOnly?: boolean;
+  /**
+   * 2025-03-26 이전 서버: PRM·AS 메타데이터(RFC 8414·OIDC)가 모두 404, MCP 401에 resource_metadata 없음.
+   * 오리진의 기본 엔드포인트 /authorize · /token · /register 로만 동작한다 (이 모드에서 dcr 기본값은 true).
+   */
+  noMetadata?: boolean;
+  /** revocation_endpoint_auth_methods_supported (null이면 필드 생략) */
+  revocationAuthMethods?: string[] | null;
+  /** 메타데이터 문서에 그대로 덧붙일 필드 (타입이 틀린 값 테스트용) */
+  extraMetadata?: Record<string, unknown>;
+  /** 경로별 강제 실패: HTTP 상태 코드로 응답하거나 'network'면 연결을 끊는다. 요청은 기록된다 */
+  failures?: Record<string, number | 'network'>;
 }
 
 export interface RecordedRequest {
@@ -115,7 +133,7 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 export async function startFakeAs(options: FakeAsOptions = {}): Promise<FakeAs> {
   const opts: FakeAsOptions = {
     cimd: false,
-    dcr: false,
+    dcr: options.noMetadata === true,
     issParam: false,
     revocation: false,
     dcrClientSecret: null,
@@ -160,8 +178,17 @@ export async function startFakeAs(options: FakeAsOptions = {}): Promise<FakeAs> 
     if (opts.cimd) m.client_id_metadata_document_supported = true;
     if (opts.issParam) m.authorization_response_iss_parameter_supported = true;
     if (opts.revocation) m.revocation_endpoint = `${url}/revoke`;
-    return m;
+    if (opts.revocationAuthMethods) m.revocation_endpoint_auth_methods_supported = opts.revocationAuthMethods;
+    return { ...m, ...opts.extraMetadata };
   };
+
+  /** OIDC Discovery 1.0 문서: 위 필드 + OIDC 필수 필드 */
+  const oidcMetadata = (): Record<string, unknown> => ({
+    ...metadata(),
+    jwks_uri: `${url}/jwks`,
+    subject_types_supported: ['public'],
+    id_token_signing_alg_values_supported: ['RS256'],
+  });
 
   const prm = (): Record<string, unknown> => ({
     resource: opts.prm?.resource ?? mcpUrl(),
@@ -276,6 +303,45 @@ export async function startFakeAs(options: FakeAsOptions = {}): Promise<FakeAs> 
     return sendJson(res, 400, { error: 'unsupported_grant_type' });
   };
 
+  /** 인가 요청 파라미터를 검증하고 코드를 발급한다 (issueCode와 GET /authorize 공용) */
+  const issueCodeFor = (u: URL): { code: string; state: string | null; params: URLSearchParams } => {
+    const p = u.searchParams;
+    if (p.get('response_type') !== 'code') throw new Error('fake-as: response_type must be code');
+    if (p.get('code_challenge_method') !== 'S256') throw new Error('fake-as: code_challenge_method must be S256');
+    const clientId = p.get('client_id');
+    const codeChallenge = p.get('code_challenge');
+    if (!clientId || !isKnownClient(clientId)) throw new Error(`fake-as: unknown client_id ${clientId}`);
+    if (!codeChallenge) throw new Error('fake-as: code_challenge missing');
+    const code = `code-${randomBytes(8).toString('hex')}`;
+    codes.set(code, {
+      clientId,
+      codeChallenge,
+      redirectUri: p.get('redirect_uri') ?? '',
+      resource: p.get('resource'),
+      scope: p.get('scope'),
+      used: false,
+    });
+    return { code, state: p.get('state'), params: p };
+  };
+
+  /** 사용자가 브라우저로 인가 URL을 열고 동의했다고 치고 redirect_uri로 302한다 */
+  const handleAuthorize = (res: ServerResponse, u: URL): void => {
+    let issued: ReturnType<typeof issueCodeFor>;
+    try {
+      issued = issueCodeFor(u);
+    } catch (e) {
+      return sendJson(res, 400, { error: 'invalid_request', error_description: e instanceof Error ? e.message : String(e) });
+    }
+    const redirectUri = issued.params.get('redirect_uri');
+    if (!redirectUri) return sendJson(res, 400, { error: 'invalid_request', error_description: 'redirect_uri required' });
+    const back = new URL(redirectUri);
+    back.searchParams.set('code', issued.code);
+    if (issued.state !== null) back.searchParams.set('state', issued.state);
+    if (opts.issParam) back.searchParams.set('iss', opts.issuerOverride ?? url);
+    res.writeHead(302, { Location: back.href });
+    res.end();
+  };
+
   const handleRevoke = (req: IncomingMessage, res: ServerResponse, form: Record<string, string>): void => {
     if (!opts.revocation) return sendJson(res, 404, { error: 'not_found' });
     const clientId = authenticate(req, form);
@@ -303,20 +369,33 @@ export async function startFakeAs(options: FakeAsOptions = {}): Promise<FakeAs> 
     }
     requests.push({ method, path, headers: req.headers, body, form, json });
 
+    const forced = opts.failures?.[path];
+    if (forced === 'network') {
+      req.socket.destroy();
+      return;
+    }
+    if (typeof forced === 'number') return sendJson(res, forced, { error: 'forced_failure' });
+
+    const servesMetadata = opts.metadata !== false && !opts.noMetadata;
     if (method === 'GET' && path === '/.well-known/oauth-authorization-server') {
-      if (opts.metadata === false) return sendJson(res, 404, { error: 'not_found' });
+      if (!servesMetadata || opts.oidcOnly) return sendJson(res, 404, { error: 'not_found' });
       return sendJson(res, 200, metadata());
     }
-    if (method === 'GET' && path.startsWith('/.well-known/openid-configuration')) return sendJson(res, 404, { error: 'not_found' });
+    if (method === 'GET' && path.startsWith('/.well-known/openid-configuration')) {
+      if (servesMetadata && opts.oidcOnly && path === '/.well-known/openid-configuration') return sendJson(res, 200, oidcMetadata());
+      return sendJson(res, 404, { error: 'not_found' });
+    }
     if (method === 'GET' && (path === `/.well-known/oauth-protected-resource${mcpPath}` || path === '/.well-known/oauth-protected-resource')) {
-      if (opts.prm?.enabled === false) return sendJson(res, 404, { error: 'not_found' });
+      if (opts.prm?.enabled === false || opts.noMetadata) return sendJson(res, 404, { error: 'not_found' });
       return sendJson(res, 200, prm());
     }
+    if (method === 'GET' && path === '/authorize') return handleAuthorize(res, u);
     if (method === 'POST' && path === '/register') return handleRegister(res, json);
     if (method === 'POST' && path === '/token') return handleToken(req, res, form);
     if (method === 'POST' && path === '/revoke') return handleRevoke(req, res, form);
     if (path === mcpPath) {
-      res.writeHead(401, { 'WWW-Authenticate': `Bearer resource_metadata="${prmUrl()}"` });
+      // 2025-03-26 이전 서버는 PRM을 모르므로 resource_metadata를 알려 주지 않는다
+      res.writeHead(401, { 'WWW-Authenticate': opts.noMetadata ? 'Bearer realm="mcp"' : `Bearer resource_metadata="${prmUrl()}"` });
       res.end();
       return;
     }
@@ -356,24 +435,7 @@ export async function startFakeAs(options: FakeAsOptions = {}): Promise<FakeAs> 
       clients.set(client.client_id, client);
     },
     issueCode(authorizationUrl) {
-      const u = typeof authorizationUrl === 'string' ? new URL(authorizationUrl) : authorizationUrl;
-      const p = u.searchParams;
-      if (p.get('response_type') !== 'code') throw new Error('fake-as: response_type must be code');
-      if (p.get('code_challenge_method') !== 'S256') throw new Error('fake-as: code_challenge_method must be S256');
-      const clientId = p.get('client_id');
-      const codeChallenge = p.get('code_challenge');
-      if (!clientId || !isKnownClient(clientId)) throw new Error(`fake-as: unknown client_id ${clientId}`);
-      if (!codeChallenge) throw new Error('fake-as: code_challenge missing');
-      const code = `code-${randomBytes(8).toString('hex')}`;
-      codes.set(code, {
-        clientId,
-        codeChallenge,
-        redirectUri: p.get('redirect_uri') ?? '',
-        resource: p.get('resource'),
-        scope: p.get('scope'),
-        used: false,
-      });
-      return { code, state: p.get('state'), params: p };
+      return issueCodeFor(typeof authorizationUrl === 'string' ? new URL(authorizationUrl) : authorizationUrl);
     },
     seedRefreshToken(token, info) {
       refreshTokens.set(token, { clientId: info.clientId, resource: info.resource ?? null, scope: info.scope ?? null });

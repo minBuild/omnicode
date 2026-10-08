@@ -15,6 +15,7 @@ import {
   type AuditRepo,
   type BindingRepo,
   type EventRepo,
+  type FetchLike,
   type HubConfig,
   type Logger,
   type NewServer,
@@ -355,23 +356,63 @@ export interface TestEnv {
   config: HubConfig;
   logger: Logger;
   manager: HubOAuthManager;
-  /** 주입된 fetch가 처리한 요청 수 (모든 outbound HTTP가 주입 fetch를 통과하는지 확인용) */
+  /** 관리자에 주입한 fetch (guardedFetch 자리) */
+  fetch: FetchLike;
+  /** 주입된 fetch가 처리한 요청 URL (모든 outbound HTTP가 주입 fetch를 통과하는지 확인용). 가상 호스트는 바꾸기 전 URL */
   fetchCalls: string[];
 }
 
-export function createEnv(opts: { config?: Partial<HubConfig>; clock?: FakeClock } = {}): TestEnv {
+/**
+ * 가상 오리진 → 실제 주소. 예: { 'https://legacy.example': fakeAs.url }.
+ * 가짜 서버는 http 루프백에서 돌지만, 인가 URL은 https여야 하므로(10.3) 기본 엔드포인트를 https 오리진으로 시험할 때 쓴다.
+ */
+export type VirtualHosts = Record<string, string>;
+
+export function routeHost(url: string | URL, hosts: VirtualHosts): string {
+  const u = new URL(String(url));
+  const target = hosts[u.origin];
+  return target ? `${new URL(target).origin}${u.pathname}${u.search}` : u.href;
+}
+
+export function createEnv(opts: { config?: Partial<HubConfig>; clock?: FakeClock; hosts?: VirtualHosts } = {}): TestEnv {
   const clock = opts.clock ?? createClock();
   const registry = createFakeRegistry(() => clock.now());
   const secrets = new FakeSecretStore();
   const config = makeConfig(opts.config);
   const logger = pino({ level: 'silent' });
   const fetchCalls: string[] = [];
-  const guarded = (url: string | URL, init?: RequestInit): Promise<Response> => {
+  const hosts = opts.hosts ?? {};
+  const guarded: FetchLike = (url, init) => {
     fetchCalls.push(String(url));
-    return fetch(url, init);
+    return fetch(routeHost(url, hosts), init);
   };
   const manager = createOAuthManager({ config, registry, secrets, fetch: guarded, logger, now: () => clock.now() });
-  return { registry, secrets, clock, config, logger, manager, fetchCalls };
+  return { registry, secrets, clock, config, logger, manager, fetch: guarded, fetchCalls };
+}
+
+/** Hub 재시작 흉내: 같은 registry·secrets·fetch로 관리자를 새로 만든다 (AS 메타데이터 메모리 캐시가 빈다) */
+export function restartManager(env: TestEnv): HubOAuthManager {
+  env.manager = createOAuthManager({
+    config: env.config,
+    registry: env.registry,
+    secrets: env.secrets,
+    fetch: env.fetch,
+    logger: env.logger,
+    now: () => env.clock.now(),
+  });
+  return env.manager;
+}
+
+/** 사용자 브라우저 흉내: 인가 URL을 열고(가상 호스트는 hosts로 연결) 302 Location의 code·state·iss를 돌려준다 */
+export async function followAuthorization(
+  authorizationUrl: string,
+  hosts: VirtualHosts = {},
+): Promise<{ code: string; state: string; iss: string | null; location: URL }> {
+  const res = await fetch(routeHost(authorizationUrl, hosts), { redirect: 'manual' });
+  const location = res.headers.get('location');
+  if (res.status !== 302 || !location) throw new Error(`authorize did not redirect: HTTP ${res.status} ${await res.text()}`);
+  const back = new URL(location);
+  return { code: back.searchParams.get('code') ?? '', state: back.searchParams.get('state') ?? '', iss: back.searchParams.get('iss'), location: back };
 }
 
 export function addServer(env: TestEnv, as: FakeAs, overrides: Partial<ServerRecord> = {}): ServerRecord {

@@ -300,8 +300,9 @@ describe('OAuthManager.prepare — discovery and registration precedence (10.3)'
     await expect(env.manager.prepare('missing')).rejects.toMatchObject({ code: 'not_found' });
   });
 
-  it('fails with oauth_registration_failed when no AS metadata can be found or the issuer does not match', async () => {
-    const none = await as({ metadata: false, prm: { enabled: false } });
+  it('fails with oauth_registration_failed when the PRM-advertised AS has no metadata or the issuer does not match', async () => {
+    // PRM이 있으므로 2025-03-26 기본 엔드포인트 폴백(10.3)은 적용되지 않는다 — 메타데이터가 전혀 없는 경우는 fallback.test.ts
+    const none = await as({ metadata: false });
     const env = createEnv();
     const s1 = addServer(env, none, { id: 's1' });
     await expect(env.manager.prepare(s1.id)).rejects.toBeInstanceOf(ApiError);

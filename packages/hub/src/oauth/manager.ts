@@ -1,10 +1,11 @@
 /**
  * OAuth 관리자 (설계 10장). Hub = MCP 클라이언트.
  *
- * - 탐색(PRM·AS 메타데이터)은 SDK 헬퍼를 쓰고, 모든 HTTP는 주입된 guardedFetch로 나간다 (16.2).
+ * - 탐색(PRM·AS 메타데이터)은 discovery.ts(SDK 후보 URL·스키마)가 맡고, 모든 HTTP는 주입된 guardedFetch로 나간다 (16.2).
  * - 여기서 직접 구현하는 것: 등록 우선순위(사전 등록 > CIMD > DCR > 입력 요청), issuer 바인딩,
  *   state 1회용 저장, iss 검증, refresh 단일 비행, scope step-up, RFC 7009 폐기, 시크릿 저장.
- * - AS 메타데이터는 issuer별로 메모리에만 캐시한다 (영속화하지 않음).
+ * - AS 메타데이터는 issuer별로 메모리에만 캐시한다 (영속화하지 않음). OIDC 문서는 원문 필드를 되살린 결과를,
+ *   메타데이터가 전혀 없는 서버(10.3 폴백)는 2025-03-26 기본 엔드포인트로 합성한 결과를 담는다.
  */
 import { randomBytes } from 'node:crypto';
 import {
@@ -37,8 +38,9 @@ import {
 import {
   canonicalResourceUrl,
   discover,
-  discoverAuthorizationServer,
+  findAuthorizationServerMetadata,
   issuersEqual,
+  legacyDefaultMetadata,
   metadataFlag,
   metadataString,
   metadataStringList,
@@ -96,8 +98,16 @@ const CIMD_PATH = '/.well-known/omnicode/client.json';
 const CALLBACK_PATH = '/oauth/callback';
 const LAST_ERROR_MAX = 512;
 const DCR_SOFTWARE_ID = 'omnicode';
+/** 추측한 등록 엔드포인트(10.3 폴백의 /register)가 "없다"는 응답: 그 서버는 DCR을 지원하지 않는다 */
+const ABSENT_ENDPOINT_STATUSES: ReadonlySet<number> = new Set([404, 405, 501]);
 
 type ClientAuthMethod = ReturnType<typeof selectClientAuthMethod>;
+
+interface CachedMetadata {
+  metadata: AuthorizationServerMetadata;
+  /** 10.3 폴백으로 합성한 2025-03-26 기본 엔드포인트 */
+  fallback: boolean;
+}
 
 interface DcrRegistration {
   client_id: string;
@@ -137,7 +147,7 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
   const now = deps.now ?? (() => new Date());
   const nowIso = (): string => now().toISOString();
   const masker = createMasker();
-  const metadataCache = new Map<string, AuthorizationServerMetadata>();
+  const metadataCache = new Map<string, CachedMetadata>();
   const refreshFlights = new SingleFlight<OAuthSecret>();
 
   const base = publicBase(config.publicUrl);
@@ -181,12 +191,41 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
     await secrets.put(ref, secret);
   }
 
-  async function getMetadata(issuer: string): Promise<AuthorizationServerMetadata> {
+  /**
+   * 10.3 폴백(2025-03-26 기본 엔드포인트)으로 등록된 서버인가: PRM 없이 탐색했고(oauth_prm_url 없음)
+   * issuer가 MCP 서버 오리진이다. 폴백 여부는 따로 저장하지 않으므로 재시작 뒤에는 이 조건으로 판단한다.
+   */
+  function usesLegacyDefaults(server: ServerRecord, issuer: string): boolean {
+    if (!server.url || server.oauth_prm_url) return false;
+    try {
+      return issuersEqual(issuer, new URL(server.url).origin);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * issuer의 AS 메타데이터. 캐시가 비어 있으면(재시작 등) 다시 탐색한다. 탐색 결과가 "없음"일 때
+   * 기본 엔드포인트로 되돌아가는 것은 폴백 대상 서버뿐이다 — PRM이 가리킨 인가 서버의 메타데이터가 사라졌다고
+   * 기본값으로 바꾸지 않는다. 합성 캐시는 폴백 대상이 아닌 서버에 쓰지 않는다.
+   */
+  async function getMetadata(server: ServerRecord, issuer: string): Promise<AuthorizationServerMetadata> {
     const key = normalizeIssuer(issuer);
+    const fallbackAllowed = usesLegacyDefaults(server, issuer);
     const cached = metadataCache.get(key);
-    if (cached) return cached;
-    const metadata = await discoverAuthorizationServer(issuer, fetchFn);
-    metadataCache.set(key, metadata);
+    if (cached && (!cached.fallback || fallbackAllowed)) return cached.metadata;
+
+    const found = await findAuthorizationServerMetadata(issuer, fetchFn, logger);
+    if (found) {
+      metadataCache.set(key, { metadata: found.metadata, fallback: false });
+      return found.metadata;
+    }
+    if (!fallbackAllowed || !server.url) {
+      throw new ApiError('oauth_registration_failed', '인가 서버 메타데이터를 찾을 수 없습니다', { authorizationServer: issuer });
+    }
+    const metadata = legacyDefaultMetadata(server.url);
+    metadataCache.set(key, { metadata, fallback: true });
+    logger.info({ serverId: server.id, issuer }, 'oauth: no authorization server metadata; using the 2025-03-26 default endpoints');
     return metadata;
   }
 
@@ -265,7 +304,11 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
 
   // ---------------------------------------------------------------- DCR (10.3 등록 3번)
 
-  async function registerDynamically(registrationEndpoint: string, scope: string | null): Promise<DcrRegistration> {
+  /**
+   * DCR 요청. endpointGuessed(10.3 폴백의 /register)면 404·405·501을 "DCR 미지원"으로 보고 null을 돌려준다 —
+   * 2025-03-26 스펙도 DCR을 지원하지 않는 서버에는 client 정보를 직접 입력받으라고 한다. 그 밖의 실패는 throw.
+   */
+  async function registerDynamically(registrationEndpoint: string, scope: string | null, endpointGuessed: boolean): Promise<DcrRegistration | null> {
     if (!redirectUri) throw new ApiError('oauth_registration_failed', 'OMNICODE_PUBLIC_URL이 없어 동적 등록을 할 수 없습니다');
     const body: Record<string, unknown> = {
       client_name: `OmniCode (${publicHost})`,
@@ -291,6 +334,10 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
       throw new ApiError('oauth_registration_failed', `동적 클라이언트 등록 요청 실패: ${errMsg(e)}`, { registrationEndpoint });
     }
     if (!res.ok) {
+      if (endpointGuessed && ABSENT_ENDPOINT_STATUSES.has(res.status)) {
+        await res.body?.cancel().catch(() => undefined);
+        return null;
+      }
       const err = await parseErrorResponse(res);
       throw new ApiError('oauth_registration_failed', `동적 클라이언트 등록 거부: ${describeError(err)}`, {
         registrationEndpoint,
@@ -331,7 +378,7 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
     const www = parseWwwAuthenticate(wwwAuthenticate);
     const disc = await discover(server.url, www, fetchFn, logger);
     const issuer = disc.issuer;
-    metadataCache.set(normalizeIssuer(issuer), disc.metadata);
+    metadataCache.set(normalizeIssuer(issuer), { metadata: disc.metadata, fallback: disc.metadataFallback });
 
     const { canonical, resource } = selectResource(server.url, disc.prm);
     const prmScopes = disc.prm?.scopes_supported;
@@ -366,21 +413,30 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
       clientMode = 'cimd';
       clientId = cimdClientId;
     } else if (disc.metadata.registration_endpoint && redirectUri) {
-      clientMode = 'dcr';
       if (existing?.client_mode === 'dcr' && existing.client_id) {
+        clientMode = 'dcr';
         clientId = existing.client_id;
         clientSecret = existing.client_secret;
         authMethod = existing.token_endpoint_auth_method;
         registrationAccessToken = existing.registration_access_token;
         registrationClientUri = existing.registration_client_uri;
       } else {
-        const reg = await registerDynamically(disc.metadata.registration_endpoint, requestedScope);
-        clientId = reg.client_id;
-        clientSecret = reg.client_secret;
-        authMethod = reg.token_endpoint_auth_method;
-        registrationAccessToken = reg.registration_access_token;
-        registrationClientUri = reg.registration_client_uri;
-        logger.info({ serverId, issuer, authMethod }, 'oauth: dynamic client registration completed');
+        const reg = await registerDynamically(disc.metadata.registration_endpoint, requestedScope, disc.metadataFallback);
+        if (reg) {
+          clientMode = 'dcr';
+          clientId = reg.client_id;
+          clientSecret = reg.client_secret;
+          authMethod = reg.token_endpoint_auth_method;
+          registrationAccessToken = reg.registration_access_token;
+          registrationClientUri = reg.registration_client_uri;
+          logger.info({ serverId, issuer, authMethod }, 'oauth: dynamic client registration completed');
+        } else {
+          // 기본 /register가 없다: DCR을 지원하지 않는 2025-03-26 서버 → 사전 등록 입력 (10.3 등록 4번)
+          logger.info({ serverId, issuer, registrationEndpoint: disc.metadata.registration_endpoint }, 'oauth: default registration endpoint not found; client input required');
+          needsClientInput = true;
+          clientMode = 'preregistered';
+          clientId = '';
+        }
       }
     } else {
       needsClientInput = true;
@@ -440,11 +496,17 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
         scope: requestedScope,
         needsClientInput,
         prmUrl: disc.prmUrl,
+        metadataUrl: disc.metadataUrl,
+        // 10.3 탐색 폴백: PRM·AS 메타데이터가 전혀 없어 2025-03-26 기본 엔드포인트를 썼다
+        metadataFallback: disc.metadataFallback,
         resource,
         issuerChanged,
       },
     });
-    logger.info({ serverId, issuer, clientMode, needsClientInput, scope: requestedScope }, 'oauth: discovery completed');
+    logger.info(
+      { serverId, issuer, clientMode, needsClientInput, scope: requestedScope, metadataFallback: disc.metadataFallback },
+      'oauth: discovery completed',
+    );
 
     return { issuer, clientMode, scope: requestedScope, needsClientInput };
   }
@@ -464,7 +526,7 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
     if (!secret || !secret.client_id) {
       throw new ApiError('oauth_not_applicable', 'client_id가 필요합니다', { needsClientInput: true });
     }
-    const metadata = await getMetadata(secret.issuer);
+    const metadata = await getMetadata(server, secret.issuer);
     const state = base64url(randomBytes(32));
     const scope = server.requested_scope ?? undefined;
 
@@ -544,7 +606,7 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
 
     let metadata: AuthorizationServerMetadata;
     try {
-      metadata = await getMetadata(secret.issuer);
+      metadata = await getMetadata(server, secret.issuer);
     } catch (e) {
       markNeedsAuth(serverId, `인가 서버 메타데이터 조회 실패: ${errMsg(e)}`, { reason: 'discovery_failed' });
       return fail(serverId, 'oauth_registration_failed');
@@ -673,7 +735,7 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
 
     let metadata: AuthorizationServerMetadata;
     try {
-      metadata = await getMetadata(secret.issuer);
+      metadata = await getMetadata(server, secret.issuer);
     } catch (e) {
       throw new RefreshFailure('transient', `인가 서버 메타데이터 조회 실패: ${errMsg(e)}`, null, e);
     }
@@ -822,7 +884,7 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
       let endpoint: string | null = null;
       let metadata: AuthorizationServerMetadata | null = null;
       try {
-        metadata = await getMetadata(secret.issuer);
+        metadata = await getMetadata(server, secret.issuer);
         endpoint = metadataString(metadata, 'revocation_endpoint');
       } catch (e) {
         logger.warn({ serverId, err: errMsg(e) }, 'oauth: revocation skipped (metadata unavailable)');
