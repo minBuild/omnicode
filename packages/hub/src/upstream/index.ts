@@ -91,6 +91,9 @@ class DetectingConnector implements UpstreamConnector {
   get capabilities(): Record<string, unknown> | null {
     return this.connector?.capabilities ?? null;
   }
+  get lastToolsTtlMs(): number | null {
+    return this.connector?.lastToolsTtlMs ?? null;
+  }
 
   async connect(): Promise<ProbeResult> {
     if (this.closed) throw unavailableError('upstream connector is closed');

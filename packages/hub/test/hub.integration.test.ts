@@ -58,6 +58,7 @@ describe('hub integration (legacy upstream)', () => {
       eventRetentionDays: 180,
       agentTokenGraceMs: 60_000,
       healthIntervalMs: 600_000,
+      forwardLogMessages: true,
       presetsDir: new URL('../../../presets', import.meta.url).pathname,
       version: 'test',
     };
@@ -173,5 +174,22 @@ describe('hub integration (legacy upstream)', () => {
     expect(hub.tokens.authenticate(old)).toBe('codex');
     expect(agentd.tokens.codex).not.toBe(old);
     expect(hub.tokens.authenticate(agentd.tokens.codex!)).toBe('codex');
+  });
+
+  it('keeps in-flight calls alive when the upstream tool list changes (D8: refresh does not re-probe)', async () => {
+    const created = await hub.servers.create({ source: 'url', url: fixture.url, id: 'keep-alive' });
+    await hub.servers.approve('keep-alive', { tools: created.tools.map((t) => ({ name: t.name, schemaHash: t.schemaHash })), bindings: { claude: true } });
+    const { client, transport } = await agentClient('keep-alive', 'claude');
+    const before = fixture.count('initialize');
+    const slow = client.callTool({ name: 'slow', arguments: { ms: 600, everyMs: 50 } });
+    await new Promise((r) => setTimeout(r, 150));
+    await fixture.emitListChanged('tools');
+    const res = await slow;
+    expect(JSON.stringify(res)).toContain('done');
+    // 목록 갱신이 업스트림 세션을 새로 열지 않았다
+    await new Promise((r) => setTimeout(r, 100));
+    expect(fixture.count('initialize')).toBe(before);
+    await transport.terminateSession();
+    await hub.servers.delete('keep-alive');
   });
 });

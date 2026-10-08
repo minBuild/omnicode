@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
+import { LoggingMessageNotificationSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createMasker, type Agent, type AuditEntry, type BindingRecord, type ServerRecord, type ToolRecord } from '@omnicode/shared';
 import { UpstreamError, type CallContext, type HubConfig, type Registry, type UpstreamConnector } from '../../src/contracts.js';
 import { createDownstreamServer, type DownstreamServer } from '../../src/downstream/server.js';
@@ -26,7 +26,7 @@ function fakeConnector(): UpstreamConnector & { calls: Array<{ name: string; ctx
   const calls: Array<{ name: string; ctx: CallContext }> = [];
   const listChanged: Array<(k: 'tools' | 'prompts' | 'resources') => void> = [];
   return {
-    serverId: 'fish', era: 'legacy', protocolVersion: '2025-06-18', transport: 'streamable_http', serverInfo: { name: 'fake', version: '1' }, capabilities: { tools: {}, prompts: {} },
+    serverId: 'fish', era: 'legacy', protocolVersion: '2025-06-18', transport: 'streamable_http', serverInfo: { name: 'fake', version: '1' }, capabilities: { tools: {}, prompts: {} }, lastToolsTtlMs: null,
     calls, listChanged,
     connect: async () => ({ era: 'legacy', protocolVersion: '2025-06-18', transport: 'streamable_http', serverInfo: null, capabilities: null }),
     listTools: async () => [],
@@ -39,6 +39,13 @@ function fakeConnector(): UpstreamConnector & { calls: Array<{ name: string; ctx
         }
       }
       if (params.name === 'boom') throw new UpstreamError('timeout', 'took too long');
+      if (params.name === 'log') {
+        // 업스트림이 자기 요청 헤더를 로그에 찍은 상황 (16.6 마스킹 대상)
+        for (const level of ['debug', 'info', 'error'] as const) {
+          ctx.onMessage?.({ level, logger: 'upstream', data: { msg: `${level} line`, header: 'Bearer upstream-access-token-123456' } });
+        }
+        return { content: [{ type: 'text', text: `logLevel=${ctx.logLevel ?? '-'} sink=${ctx.onMessage ? 'yes' : 'no'}` }] };
+      }
       if (params.name === 'auth') throw new UpstreamError('unauthorized', 'nope');
       return { content: [{ type: 'text', text: `echo:${JSON.stringify(params.arguments ?? {})}:job=${ctx.jobId ?? '-'}:params=${JSON.stringify(ctx.mcpParamHeaders)}` }] };
     },
@@ -51,8 +58,8 @@ function fakeConnector(): UpstreamConnector & { calls: Array<{ name: string; ctx
 
 interface World { srv: DownstreamServer; port: number; records: { server: ServerRecord; tools: ToolRecord[]; bindings: BindingRecord[] }; audit: Omit<AuditEntry, 'id'>[]; connector: ReturnType<typeof fakeConnector>; errors: UpstreamError[]; }
 
-async function world(status: ServerRecord['status'] = 'active'): Promise<World> {
-  const records = { server: mkServer(status), tools: [mkTool('echo'), mkTool('slow'), mkTool('boom'), mkTool('auth'), mkTool('pending', false)], bindings: [{ server_id: 'fish', agent: 'claude', enabled: 1, sync_status: null, synced_at: null, last_error: null } as BindingRecord] };
+async function world(status: ServerRecord['status'] = 'active', configOver: Partial<HubConfig> = {}): Promise<World> {
+  const records = { server: mkServer(status), tools: [mkTool('echo'), mkTool('slow'), mkTool('boom'), mkTool('auth'), mkTool('log'), mkTool('pending', false)], bindings: [{ server_id: 'fish', agent: 'claude', enabled: 1, sync_status: null, synced_at: null, last_error: null } as BindingRecord] };
   const registry = {
     servers: { get: (id: string) => (id === 'fish' ? records.server : undefined) },
     tools: { listByServer: () => records.tools },
@@ -62,13 +69,13 @@ async function world(status: ServerRecord['status'] = 'active'): Promise<World> 
   const connector = fakeConnector();
   const errors: UpstreamError[] = [];
   const deps: DownstreamDeps = {
-    config: { hubHost: '127.0.0.1', hubPort: 0, idleTimeoutMs: 1000, version: 'test' } as HubConfig,
+    config: { hubHost: '127.0.0.1', hubPort: 0, idleTimeoutMs: 1000, version: 'test', forwardLogMessages: true, ...configOver } as HubConfig,
     registry,
     tokens: { authenticate: (t: string) => (Object.entries(TOKENS).find(([, v]) => v === t)?.[0] as Agent | undefined) ?? null, rotate: async () => ({ rotatedAt: '', graceUntil: '' }) },
     connectors: { get: async () => connector, peek: () => connector },
     hooks: { onUpstreamError: async (_id, e) => void errors.push(e), onUpstreamOk: async () => undefined },
     audit: { record: (e) => void audit.push(e) },
-    masker: createMasker(),
+    masker: createMasker(['upstream-access-token-123456']),
     logger: { info() {}, warn() {}, error: (...a: unknown[]) => { if (process.env.DEBUG_DOWNSTREAM) console.error(...a); }, debug() {} } as unknown as DownstreamDeps['logger'],
   };
   const srv = createDownstreamServer(deps, { port: 0 });
@@ -109,7 +116,7 @@ describe('downstream server', () => {
   it('serves approved tools to a bound agent and forwards calls with job id and Mcp-Param headers', async () => {
     const { client, transport } = await connect(w.port, TOKENS.claude, { 'X-OmniCode-Job': 'job-42', 'Mcp-Param-Region': 'us-west1' });
     const tools = await client.listTools();
-    expect(tools.tools.map((t) => t.name).sort()).toEqual(['auth', 'boom', 'echo', 'slow']);
+    expect(tools.tools.map((t) => t.name).sort()).toEqual(['auth', 'boom', 'echo', 'log', 'slow']);
     const res = await client.callTool({ name: 'echo', arguments: { text: 'hi' } });
     const text = (res.content as Array<{ text: string }>)[0]?.text ?? '';
     expect(text).toContain('echo:{"text":"hi"}');
@@ -169,5 +176,35 @@ describe('downstream server', () => {
     const sid = claude.transport.sessionId!;
     const r = await fetch(`http://127.0.0.1:${w.port}/mcp/fish`, { method: 'POST', headers: { authorization: `Bearer ${TOKENS.codex}`, 'mcp-session-id': sid, 'content-type': 'application/json', accept: 'application/json, text/event-stream' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }) });
     expect(r.status).toBe(404);
+  });
+
+  it('forwards upstream log messages on the request stream, masked, filtered by the session level (D1)', async () => {
+    const { client } = await connect(w.port, TOKENS.claude);
+    const got: Array<{ level: string; data: unknown }> = [];
+    client.setNotificationHandler(LoggingMessageNotificationSchema, async (n) => void got.push({ level: n.params.level, data: n.params.data }));
+    const r1 = await client.callTool({ name: 'log' });
+    expect(JSON.stringify(r1)).toContain('logLevel=- sink=yes');
+    // 커넥터가 수준 필터를 맡는다. 가짜 커넥터는 필터 없이 모두 보내므로 세 줄이 온다
+    await new Promise((r) => setTimeout(r, 50));
+    expect(got.map((g) => g.level)).toEqual(['debug', 'info', 'error']);
+    expect(JSON.stringify(got)).not.toContain('upstream-access-token-123456');
+    expect(JSON.stringify(got)).toContain('Bearer ***');
+
+    await client.setLoggingLevel('error');
+    const r2 = await client.callTool({ name: 'log' });
+    expect(JSON.stringify(r2)).toContain('logLevel=error');
+  });
+});
+
+describe('downstream server with log forwarding disabled', () => {
+  it('does not give the connector a message sink', async () => {
+    const w2 = await world('active', { forwardLogMessages: false });
+    try {
+      const { client } = await connect(w2.port, TOKENS.claude);
+      const r = await client.callTool({ name: 'log' });
+      expect(JSON.stringify(r)).toContain('sink=no');
+    } finally {
+      await w2.srv.stop();
+    }
   });
 });

@@ -14,6 +14,7 @@ import { createOAuthManager, createRefreshScheduler } from './oauth/index.js';
 import { openRegistry } from './registry/index.js';
 import { createSecretsForConfig } from './secrets/index.js';
 import { createCredentialProvider } from './services/credentials.js';
+import { createHealthScheduler } from './services/health.js';
 import { createDownstreamHooks } from './services/hooks.js';
 import { loadPresets } from './services/presets.js';
 import { createServersService } from './services/servers.js';
@@ -99,18 +100,21 @@ export async function createHub(opts: CreateHubOptions): Promise<Hub> {
   }
 
   const startedAt = now().getTime();
-  let healthTimer: NodeJS.Timeout | undefined;
+  let maintenanceTimer: NodeJS.Timeout | undefined;
   let lastPurge = 0;
 
-  async function healthSweep() {
-    for (const rec of registry.servers.list()) {
-      if (!['active', 'changed', 'error'].includes(rec.status)) continue;
-      try {
-        await servers.refreshTools(rec.id);
-      } catch (e) {
-        logger.info({ serverId: rec.id, err: e instanceof Error ? e.message : String(e) }, 'health check failed');
-      }
-    }
+  // 17.3 상태 점검: 서버별 기한, ttlMs 반영, 실패 시 지수 백오프 (D8)
+  const health = createHealthScheduler(
+    () => registry.servers.list().map((r) => ({ id: r.id, status: r.status })),
+    async (serverId) => {
+      const r = await servers.refreshTools(serverId);
+      return { ok: r.ok, ttlMs: r.ttlMs };
+    },
+    { intervalMs: config.healthIntervalMs, now: () => now().getTime(), logger },
+  );
+
+  /** 토큰 사본 재시도, 보존 기간 정리 (17.4) */
+  async function maintenance() {
     await tokens.ensureFiles().catch(() => false);
     if (now().getTime() - lastPurge > 24 * 60 * 60 * 1000) {
       lastPurge = now().getTime();
@@ -162,14 +166,16 @@ export async function createHub(opts: CreateHubOptions): Promise<Hub> {
       await downstream.start();
       refresher.start();
       presetsCache = loadPresets(config.presetsDir, logger).presets;
-      healthTimer = setInterval(() => void healthSweep(), config.healthIntervalMs);
-      healthTimer.unref();
+      health.start();
+      maintenanceTimer = setInterval(() => void maintenance(), config.healthIntervalMs);
+      maintenanceTimer.unref();
       // 시작 직후 동기화 (12.2). 실패해도 Hub 는 뜬다
       sync.all().catch((e: unknown) => logger.warn({ err: String(e) }, 'initial sync failed'));
       logger.info({ port: downstream.port, servers: registry.servers.list().length }, 'omnicode hub started');
     },
     async stop() {
-      if (healthTimer) clearInterval(healthTimer);
+      health.stop();
+      if (maintenanceTimer) clearInterval(maintenanceTimer);
       refresher.stop();
       await downstream.stop();
       await pool.closeAll();

@@ -20,6 +20,8 @@ export interface RecordedRequest {
 }
 
 export interface LegacyFixtureOptions {
+  /** 요청 스트림에 로그를 보내는 'log' 도구와 logging capability 를 더한다 (D1 테스트) */
+  withLogTool?: boolean;
   /** tools/list 페이지 크기 (없으면 한 페이지) */
   pageSize?: number;
   /** SSE 대신 JSON 응답 (progress 알림은 실리지 않는다) */
@@ -35,6 +37,8 @@ export interface LegacyFixture {
   setUnauthorized(wwwAuthenticate: string | null, status?: number): void;
   readonly unauthorizedHits: number;
   emitListChanged(kind: 'tools' | 'prompts' | 'resources'): Promise<void>;
+  /** 요청과 무관한 세션 스트림 로그 (withLogTool 일 때만) */
+  emitSessionLog(level: 'info' | 'error', data: unknown): Promise<void>;
   /** 모든 세션을 버린다 → 옛 세션 ID로 오는 요청은 404 */
   dropSessions(): Promise<void>;
   sessionIds(): string[];
@@ -67,11 +71,34 @@ export interface LegacyToolState {
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** 도구 3개를 가진 McpServer. upstream-legacy-sse 픽스처도 같이 쓴다. */
-export function buildLegacyMcpServer(state: LegacyToolState, opts: { pageSize?: number; serverName?: string } = {}): McpServer {
+export function buildLegacyMcpServer(state: LegacyToolState, opts: { pageSize?: number; serverName?: string; withLogTool?: boolean } = {}): McpServer {
   const mcp = new McpServer(
     { name: opts.serverName ?? 'legacy-fixture', version: '1.0.0' },
-    { capabilities: { prompts: { listChanged: true }, resources: { listChanged: true } }, instructions: 'legacy fixture' },
+    {
+      capabilities: { prompts: { listChanged: true }, resources: { listChanged: true }, ...(opts.withLogTool ? { logging: {} } : {}) },
+      instructions: 'legacy fixture',
+    },
   );
+  if (opts.withLogTool) {
+    // 요청 스트림에 notifications/message 를 보낸다 (D1). gapMs 로 동시 호출이 섞이게 할 수 있다
+    mcp.registerTool(
+      'log',
+      {
+        description: 'emits log messages on the request stream',
+        inputSchema: { messages: z.array(z.object({ level: z.string(), data: z.unknown() })), gapMs: z.number().optional() },
+      },
+      async ({ messages, gapMs }, extra) => {
+        for (const m of messages) {
+          await extra.sendNotification({
+            method: 'notifications/message',
+            params: { level: m.level as 'info', logger: 'fixture', data: m.data },
+          });
+          if (gapMs) await sleep(gapMs);
+        }
+        return { content: [{ type: 'text', text: `logged ${messages.length}` }] };
+      },
+    );
+  }
   mcp.registerTool('echo', { description: 'echoes text', inputSchema: { text: z.string() } }, async ({ text }) => ({
     content: [{ type: 'text', text: `echo:${text}` }],
   }));
@@ -247,6 +274,9 @@ export async function startLegacyFixture(opts: LegacyFixtureOptions = {}): Promi
         else if (kind === 'prompts') await s.mcp.server.sendPromptListChanged();
         else await s.mcp.server.sendResourceListChanged();
       }
+    },
+    async emitSessionLog(level, data) {
+      for (const s of sessions.values()) await s.mcp.server.sendLoggingMessage({ level, logger: 'session', data });
     },
     async dropSessions() {
       const all = [...sessions.values()];

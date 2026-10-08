@@ -57,6 +57,8 @@ export interface HubConfig {
   eventRetentionDays: number;
   agentTokenGraceMs: number;
   healthIntervalMs: number;
+  /** 업스트림 notifications/message 를 다운스트림 요청 스트림으로 전달할지 (D1, 11.3). 기본 true */
+  forwardLogMessages: boolean;
   presetsDir: string;
   version: string;
 }
@@ -305,6 +307,27 @@ export interface ProgressNotification {
   message?: string;
 }
 
+/** MCP 로그 수준 (RFC 5424 순서). 2026-07-28 에서 Logging 은 Deprecated 지만 legacy 서버는 계속 보낸다 */
+export type LoggingLevel = 'debug' | 'info' | 'notice' | 'warning' | 'error' | 'critical' | 'alert' | 'emergency';
+export const LOGGING_LEVELS: readonly LoggingLevel[] = ['debug', 'info', 'notice', 'warning', 'error', 'critical', 'alert', 'emergency'];
+/** 다운스트림이 수준을 정하지 않았을 때 전달하는 최소 수준 */
+export const DEFAULT_FORWARD_LOG_LEVEL: LoggingLevel = 'info';
+
+export function isLoggingLevel(x: unknown): x is LoggingLevel {
+  return typeof x === 'string' && (LOGGING_LEVELS as readonly string[]).includes(x);
+}
+/** level 이 min 이상인가 */
+export function logLevelAtLeast(level: LoggingLevel, min: LoggingLevel): boolean {
+  return LOGGING_LEVELS.indexOf(level) >= LOGGING_LEVELS.indexOf(min);
+}
+
+/** 업스트림이 요청 스트림에 보낸 notifications/message 의 params */
+export interface LogMessageNotification {
+  level: LoggingLevel;
+  logger?: string;
+  data: unknown;
+}
+
 export interface CallContext {
   agent: Agent;
   jobId?: string;
@@ -316,6 +339,13 @@ export interface CallContext {
   onProgress: (n: ProgressNotification) => void;
   timeoutMs: number;
   idleTimeoutMs: number;
+  /** 다운스트림이 logging/setLevel 로 요청한 최소 수준. 없으면 DEFAULT_FORWARD_LOG_LEVEL (D1) */
+  logLevel?: LoggingLevel;
+  /**
+   * 업스트림이 이 요청에 딸려 보낸 notifications/message (D1). 없으면 전달하지 않는다.
+   * 커넥터는 수준(logLevel) 필터를 적용한 뒤 부른다. 요청과 묶을 수 없는 메시지(세션 스트림)는 버린다.
+   */
+  onMessage?: (n: LogMessageNotification) => void;
 }
 
 export interface ProbeResult {
@@ -367,6 +397,17 @@ export interface UpstreamConnectorOptions {
   era?: ProtocolEra;
 }
 
+/** tools/call params (D9). 알려진 필드 외에는 넣지 않는다 */
+export interface CallToolParams {
+  name: string;
+  arguments?: Record<string, unknown>;
+  _meta?: Record<string, unknown>;
+  /** 2026-07-28 MRTR: InputRequiredResult 의 inputRequests 에 대한 응답 */
+  inputResponses?: Record<string, unknown>;
+  /** 2026-07-28 MRTR: 서버가 준 불투명 상태. 그대로 되돌려 보낸다 */
+  requestState?: string;
+}
+
 export interface UpstreamConnector {
   readonly serverId: string;
   readonly era: ProtocolEra;
@@ -374,11 +415,16 @@ export interface UpstreamConnector {
   readonly transport: 'streamable_http' | 'sse';
   readonly serverInfo: Record<string, unknown> | null;
   readonly capabilities: Record<string, unknown> | null;
+  /** 마지막 tools/list 결과의 ttlMs (modern 의 CacheableResult). legacy 나 미조회면 null (17.3, D8) */
+  readonly lastToolsTtlMs: number | null;
   /** 연결·세대 감지·initialize 또는 server/discover. 401이면 UpstreamError('unauthorized') */
   connect(): Promise<ProbeResult>;
   listTools(signal?: AbortSignal): Promise<ToolDefinition[]>;
-  /** tools/call. 결과는 CallToolResult JSON 그대로. 재시도하지 않는다 (401 후 1회 제외) */
-  callTool(params: { name: string; arguments?: Record<string, unknown>; _meta?: Record<string, unknown> }, ctx: CallContext): Promise<Record<string, unknown>>;
+  /**
+   * tools/call. 결과는 CallToolResult JSON 그대로. 재시도하지 않는다 (401 후 1회 제외).
+   * modern MRTR 재시도의 inputResponses·requestState 는 params 최상위 필드로 그대로 전달한다 (11.4, D9).
+   */
+  callTool(params: CallToolParams, ctx: CallContext): Promise<Record<string, unknown>>;
   /** resources/list, resources/templates/list, resources/read, prompts/list, prompts/get, completion/complete */
   forward(method: string, params: Record<string, unknown> | undefined, ctx: CallContext): Promise<Record<string, unknown>>;
   /** 업스트림이 보낸 목록 변경 알림 */

@@ -17,7 +17,7 @@ import {
   type ServerCapabilities,
 } from '@modelcontextprotocol/sdk/types.js';
 import { DEFAULTS, HubError, JOB_ID_RE, LIMITS, sha256Hex, type Agent, type AuditEntry, type ToolRecord } from '@omnicode/shared';
-import { UpstreamError, type CallContext, type UpstreamConnector } from '../contracts.js';
+import { UpstreamError, isLoggingLevel, type CallContext, type LogMessageNotification, type LoggingLevel, type UpstreamConnector } from '../contracts.js';
 import type { DownstreamDeps } from './deps.js';
 import type { Limiter } from './limiter.js';
 import { authorizeCall, visibleTools, type PolicyInput } from './policy.js';
@@ -95,6 +95,30 @@ export function createSessionServer(deps: DownstreamDeps, ctx: SessionContext, l
 
   const label = () => deps.registry.servers.get(ctx.serverId)?.display_name ?? ctx.serverId;
 
+  /** 이 세션이 logging/setLevel 로 요청한 최소 수준 (D1). 업스트림으로는 보내지 않는다 (11.3) */
+  let sessionLogLevel: LoggingLevel | undefined;
+
+  /**
+   * 업스트림 문자열을 에이전트에 넘기기 전에 Hub 가 아는 비밀값을 가린다 (16.6).
+   * 업스트림이 자기 요청 헤더(우리의 access token)를 로그에 찍는 경우를 막는다.
+   */
+  const maskValue = (v: unknown): unknown => {
+    let json: string | undefined;
+    try {
+      json = JSON.stringify(v);
+    } catch {
+      return '[unserializable]';
+    }
+    if (json === undefined) return v;
+    const masked = deps.masker.mask(json);
+    if (masked === json) return v;
+    try {
+      return JSON.parse(masked) as unknown;
+    } catch {
+      return masked;
+    }
+  };
+
   const audit = (entry: Omit<AuditEntry, 'id' | 'ts' | 'agent' | 'server_id'>) =>
     deps.audit.record({ ts: now().toISOString(), agent: ctx.agent, server_id: ctx.serverId, ...entry });
 
@@ -129,6 +153,10 @@ export function createSessionServer(deps: DownstreamDeps, ctx: SessionContext, l
             }
           }, DEFAULTS.syntheticProgressIntervalMs)
         : undefined;
+    const sendMessage = (n: LogMessageNotification) => {
+      const params = { level: n.level, ...(n.logger !== undefined ? { logger: deps.masker.mask(n.logger) } : {}), data: maskValue(n.data) };
+      void (extra.sendNotification as unknown as (n: unknown) => Promise<void>)({ method: 'notifications/message', params }).catch(() => undefined);
+    };
     const call: CallContext = {
       agent: ctx.agent,
       ...(jobId ? { jobId } : {}),
@@ -137,10 +165,15 @@ export function createSessionServer(deps: DownstreamDeps, ctx: SessionContext, l
       mcpParamHeaders: mcpParamHeaders(headers),
       onProgress: (n) => {
         lastProgressAt = now().getTime();
-        send({ progress: n.progress, ...(n.total !== undefined ? { total: n.total } : {}), ...(n.message !== undefined ? { message: n.message } : {}) });
+        send({
+          progress: n.progress,
+          ...(n.total !== undefined ? { total: n.total } : {}),
+          ...(n.message !== undefined ? { message: deps.masker.mask(n.message) } : {}),
+        });
       },
       timeoutMs,
       idleTimeoutMs: deps.config.idleTimeoutMs,
+      ...(deps.config.forwardLogMessages ? { onMessage: sendMessage, ...(sessionLogLevel ? { logLevel: sessionLogLevel } : {}) } : {}),
     };
     return { call, ...(jobId ? { jobId } : {}), stop: () => heartbeat && clearInterval(heartbeat) };
   };
@@ -291,8 +324,11 @@ export function createSessionServer(deps: DownstreamDeps, ctx: SessionContext, l
   if (capabilities.prompts) forwardOne(GetPromptRequestSchema, 'prompts/get', (p) => String(p.name ?? ''));
   if (capabilities.completions) forwardOne(CompleteRequestSchema, 'completion/complete', () => 'completion');
 
-  // logging/setLevel: 수락만 하고 전달하지 않는다 (11.3)
-  server.setRequestHandler(SetLevelRequestSchema, async () => ({}));
+  // logging/setLevel: 업스트림으로 전달하지 않고, 이 세션에 넘길 로그의 최소 수준으로만 쓴다 (11.3, D1)
+  server.setRequestHandler(SetLevelRequestSchema, async (req) => {
+    if (isLoggingLevel(req.params.level)) sessionLogLevel = req.params.level;
+    return {};
+  });
 
   return server;
 }

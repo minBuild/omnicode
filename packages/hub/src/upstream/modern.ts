@@ -7,10 +7,16 @@
  */
 import { DEFAULTS, LIMITS, MODERN_MIN_PROTOCOL_VERSION, normalizeToolDefinition, truncate, type ToolDefinition } from '@omnicode/shared';
 import {
+  DEFAULT_FORWARD_LOG_LEVEL,
   UpstreamError,
+  isLoggingLevel,
+  logLevelAtLeast,
   type CallContext,
+  type CallToolParams,
   type FetchLike,
+  type LogMessageNotification,
   type Logger,
+  type LoggingLevel,
   type ProbeResult,
   type ProgressNotification,
   type UpstreamConnector,
@@ -44,6 +50,8 @@ export const MODERN_PROTOCOL_VERSION: string = MODERN_MIN_PROTOCOL_VERSION;
 export const META_PROTOCOL_VERSION = 'io.modelcontextprotocol/protocolVersion';
 export const META_CLIENT_INFO = 'io.modelcontextprotocol/clientInfo';
 export const META_CLIENT_CAPABILITIES = 'io.modelcontextprotocol/clientCapabilities';
+/** 2026-07-28: 서버는 이 값이 있는 요청에만 notifications/message 를 보낸다 (D1) */
+export const META_LOG_LEVEL = 'io.modelcontextprotocol/logLevel';
 /** `subscriptions/listen`에서 구독하는 종류 (11.2) */
 export const LISTEN_SUBSCRIPTIONS = ['toolsListChanged', 'promptsListChanged', 'resourcesListChanged'] as const;
 /** 11.4: inputRequests 없는 input_required의 자동 재시도 상한 */
@@ -85,6 +93,8 @@ export interface ModernPostOptions {
   maxBytes: number;
   /** SSE 응답 스트림의 알림 (progress · message · list_changed) */
   onNotification?: ((n: JsonRpcNotificationMessage) => void) | undefined;
+  /** 있으면 _meta.logLevel 로 이 요청의 로그를 요청한다 (D1) */
+  logLevel?: LoggingLevel | undefined;
 }
 
 export type ModernPostOutcome =
@@ -123,6 +133,8 @@ export function buildModernBody(o: {
   params?: Record<string, unknown> | undefined;
   protocolVersion: string;
   clientCapabilities: Record<string, unknown>;
+  /** 있으면 _meta 에 logLevel 을 넣어 이 요청의 로그를 받는다 (D1) */
+  logLevel?: LoggingLevel | undefined;
 }): Record<string, unknown> {
   const params = o.params ?? {};
   const meta = isRecord(params._meta) ? params._meta : {};
@@ -137,6 +149,7 @@ export function buildModernBody(o: {
         [META_PROTOCOL_VERSION]: o.protocolVersion,
         [META_CLIENT_INFO]: { ...HUB_CLIENT_INFO },
         [META_CLIENT_CAPABILITIES]: o.clientCapabilities,
+        ...(o.logLevel ? { [META_LOG_LEVEL]: o.logLevel } : {}),
       },
     },
   };
@@ -173,6 +186,7 @@ export async function modernPost(o: ModernPostOptions): Promise<ModernPostOutcom
       params: o.params,
       protocolVersion: o.protocolVersion,
       clientCapabilities: o.clientCapabilities,
+      logLevel: o.logLevel,
     }),
   );
   const res = await o.fetch(o.url, { method: 'POST', headers, body, signal: o.signal });
@@ -287,6 +301,9 @@ interface RpcOptions {
   mcpParamHeaders?: Record<string, string> | undefined;
   /** 다운스트림이 progressToken을 보냈을 때만 전달 */
   onProgress?: ((n: ProgressNotification) => void) | undefined;
+  /** 이 요청의 로그 (D1). 있으면 _meta.logLevel 을 보낸다 */
+  onMessage?: ((n: LogMessageNotification) => void) | undefined;
+  logLevel?: LoggingLevel | undefined;
 }
 
 type ListKind = 'tools' | 'prompts' | 'resources';
@@ -297,6 +314,8 @@ export class ModernConnector implements UpstreamConnector {
   readonly serverId: string;
   protocolVersion: string;
   serverInfo: Record<string, unknown> | null = null;
+  /** 마지막 tools/list 의 ttlMs (페이지 중 가장 짧은 값). 17.3 상태 점검 간격에 쓴다 */
+  lastToolsTtlMs: number | null = null;
   capabilities: Record<string, unknown> | null = null;
   /** discover가 알려 준 버전 목록 */
   supportedVersions: string[] = [];
@@ -399,12 +418,16 @@ export class ModernConnector implements UpstreamConnector {
         const tools: ToolDefinition[] = [];
         let cursor: string | undefined;
         let pages = 0;
+        let ttl: number | null = null;
         do {
           const result = await this.rpc('tools/list', cursor ? { cursor } : {}, {
             clock,
             maxBytes: this.limits.toolsListBytes,
             clientCapabilities: {},
           });
+          if (typeof result.ttlMs === 'number' && Number.isFinite(result.ttlMs) && result.ttlMs >= 0) {
+            ttl = ttl === null ? result.ttlMs : Math.min(ttl, result.ttlMs);
+          }
           if (Array.isArray(result.tools)) {
             for (const t of result.tools) {
               if (isRecord(t) && typeof t.name === 'string') tools.push(normalizeToolDefinition(t));
@@ -415,6 +438,7 @@ export class ModernConnector implements UpstreamConnector {
             throw protocolError({ code: -32603, message: `tools/list exceeded ${MAX_LIST_PAGES} pages` });
           }
         } while (cursor);
+        this.lastToolsTtlMs = ttl;
         return tools;
       } finally {
         clock.dispose();
@@ -422,10 +446,7 @@ export class ModernConnector implements UpstreamConnector {
     });
   }
 
-  async callTool(
-    params: { name: string; arguments?: Record<string, unknown>; _meta?: Record<string, unknown> },
-    ctx: CallContext,
-  ): Promise<Record<string, unknown>> {
+  async callTool(params: CallToolParams, ctx: CallContext): Promise<Record<string, unknown>> {
     await this.ensureConnected();
     const callerToken = progressTokenOf(params._meta);
     // 다운스트림 토큰이 없어도 업스트림에는 토큰을 붙여 progress를 받는다 (유휴 타임아웃 리셋용). 전달은 하지 않는다.
@@ -438,6 +459,7 @@ export class ModernConnector implements UpstreamConnector {
         clientCapabilities: capabilitiesFor(ctx),
         mcpParamHeaders: ctx.mcpParamHeaders,
         onProgress: callerToken !== undefined ? (n) => ctx.onProgress({ ...n, progressToken: callerToken }) : undefined,
+        ...logOptions(ctx),
       });
     } finally {
       clock.dispose();
@@ -455,6 +477,7 @@ export class ModernConnector implements UpstreamConnector {
         clientCapabilities: capabilitiesFor(ctx),
         mcpParamHeaders: ctx.mcpParamHeaders,
         onProgress: callerToken !== undefined ? (n) => ctx.onProgress({ ...n, progressToken: callerToken }) : undefined,
+        ...logOptions(ctx),
       };
       // 조회성 요청: 연결 실패에 한해 1회 재시도 (11.7)
       return await this.retryOnce(['unavailable'], () => this.requestWithInputPolicy(method, params ?? {}, ctx, rpcOpts));
@@ -565,6 +588,7 @@ export class ModernConnector implements UpstreamConnector {
             params,
             clientCapabilities: o.clientCapabilities,
             mcpParamHeaders: o.mcpParamHeaders,
+            logLevel: o.onMessage ? o.logLevel : undefined,
             signal: clock.signal,
             maxBytes: o.maxBytes,
             onNotification: (n) => this.onStreamNotification(n, o, clock),
@@ -615,6 +639,13 @@ export class ModernConnector implements UpstreamConnector {
           ...(typeof p.message === 'string' ? { message: p.message } : {}),
         });
       }
+      return;
+    }
+    if (n.method === 'notifications/message') {
+      const p = n.params;
+      if (!o.onMessage || !isRecord(p) || !isLoggingLevel(p.level)) return;
+      if (!logLevelAtLeast(p.level, o.logLevel ?? DEFAULT_FORWARD_LOG_LEVEL)) return;
+      o.onMessage({ level: p.level, ...(typeof p.logger === 'string' ? { logger: p.logger } : {}), data: p.data });
       return;
     }
     const kind = LIST_CHANGED_METHODS[n.method];
@@ -716,6 +747,12 @@ function progressTokenOf(meta: Record<string, unknown> | undefined): string | nu
 }
 
 /** 11.4: legacy 다운스트림이면 clientCapabilities를 비워 보낸다. modern이면 그대로. */
+/** 다운스트림이 로그를 받을 때만 업스트림에 logLevel 을 요청한다 (2026-07-28 은 요청한 요청에만 로그를 보낸다) */
+function logOptions(ctx: CallContext): Pick<RpcOptions, 'onMessage' | 'logLevel'> {
+  if (!ctx.onMessage) return {};
+  return { onMessage: ctx.onMessage, logLevel: ctx.logLevel ?? DEFAULT_FORWARD_LOG_LEVEL };
+}
+
 function capabilitiesFor(ctx: CallContext): Record<string, unknown> {
   return ctx.downstreamEra === 'modern' ? (ctx.clientCapabilities ?? {}) : {};
 }

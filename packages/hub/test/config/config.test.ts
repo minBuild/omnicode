@@ -36,6 +36,7 @@ describe('loadHubConfig', () => {
       eventRetentionDays: 180,
       agentTokenGraceMs: 900_000,
       healthIntervalMs: DEFAULTS.healthIntervalMs,
+      forwardLogMessages: true,
       version: pkgVersion,
     });
     expect(path.isAbsolute(c.presetsDir)).toBe(true);
@@ -88,6 +89,8 @@ describe('loadHubConfig', () => {
     for (const v of ['0', 'false', 'no', 'off', '']) expect(loadHubConfig({ [ENV.allowHttpLoopback]: v }).allowHttpLoopback, v).toBe(false);
     expect(loadHubConfig({ [ENV.dataDir]: '/srv/omni' }).fileSecretsDir).toBe('/srv/omni/secrets');
     expect(loadHubConfig({ [ENV.secretsBackend]: 'memory' }).secretsBackend).toBe('memory');
+    expect(loadHubConfig({}).forwardLogMessages).toBe(true);
+    expect(loadHubConfig({ [ENV.forwardLogMessages]: '0' }).forwardLogMessages).toBe(false);
   });
 
   it('normalizes the public URL and allows loopback http only in dev mode', () => {

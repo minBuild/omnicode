@@ -6,13 +6,19 @@
  * - 401은 onUnauthorized 뒤 정확히 1회 재시도. 403 insufficient_scope는 그대로 보고.
  * - 서버 발신 요청(sampling·elicitation·roots)은 핸들러를 두지 않아 SDK가 -32601로 답한다. capabilities도 광고하지 않는다.
  * - progress는 SDK onprogress로 받아 다운스트림 토큰을 달아 전달한다. 유휴 타임아웃은 progress마다 리셋.
+ * - notifications/message(D1)는 SDK가 어느 요청의 것인지 알려주지 않는다. 요청을 AsyncLocalStorage 문맥 안에서
+ *   보내면, 그 요청의 응답 스트림을 읽는 루프가 같은 문맥에서 알림 핸들러를 부르므로 정확히 그 호출에 전달된다.
+ *   세션 열기·재초기화는 문맥 밖에서 하므로 세션 스트림(GET)의 메시지는 어떤 호출에도 묶이지 않고 버려진다.
+ *   HTTP+SSE 전송은 모든 메시지가 세션 스트림으로 오므로 로그를 전달하지 않는다.
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { SSEClientTransport, SseError } from '@modelcontextprotocol/sdk/client/sse.js';
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {
   ErrorCode,
   LATEST_PROTOCOL_VERSION,
+  LoggingMessageNotificationSchema,
   McpError,
   PromptListChangedNotificationSchema,
   ResourceListChangedNotificationSchema,
@@ -25,9 +31,15 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { DEFAULTS, normalizeToolDefinition, type ToolDefinition } from '@omnicode/shared';
 import {
+  DEFAULT_FORWARD_LOG_LEVEL,
   UpstreamError,
+  isLoggingLevel,
+  logLevelAtLeast,
   type CallContext,
+  type CallToolParams,
+  type LogMessageNotification,
   type Logger,
+  type LoggingLevel,
   type ProbeResult,
   type ProgressNotification,
   type UpstreamConnector,
@@ -242,6 +254,9 @@ interface RequestRun {
   idleMs: number;
   totalMs?: number | undefined;
   onProgress?: ((p: Progress) => void) | undefined;
+  /** 수준 필터를 적용한 뒤 부른다 (D1) */
+  onMessage?: ((n: LogMessageNotification) => void) | undefined;
+  logLevel?: LoggingLevel | undefined;
 }
 
 export class LegacyConnector implements UpstreamConnector {
@@ -260,6 +275,10 @@ export class LegacyConnector implements UpstreamConnector {
   private readonly closingSessions = new WeakSet<LegacySession>();
   private readonly listChangedCbs = new Set<(kind: ListKind) => void>();
   private readonly closeCbs = new Set<(reason?: string) => void>();
+  /** 요청 → 그 요청의 응답 스트림에서 온 로그 알림을 받을 곳 (D1) */
+  private readonly logScope = new AsyncLocalStorage<RequestRun>();
+  /** legacy 에는 ttlMs 가 없다 (17.3) */
+  readonly lastToolsTtlMs: number | null = null;
 
   constructor(opts: UpstreamConnectorOptions, internal: LegacyInternalOptions = {}) {
     this.opts = opts;
@@ -335,6 +354,12 @@ export class LegacyConnector implements UpstreamConnector {
     s.client.setNotificationHandler(ToolListChangedNotificationSchema, () => this.emitListChanged('tools'));
     s.client.setNotificationHandler(PromptListChangedNotificationSchema, () => this.emitListChanged('prompts'));
     s.client.setNotificationHandler(ResourceListChangedNotificationSchema, () => this.emitListChanged('resources'));
+    s.client.setNotificationHandler(LoggingMessageNotificationSchema, (n) => {
+      const run = this.logScope.getStore();
+      const p = n.params as { level?: unknown; logger?: unknown; data?: unknown };
+      if (!run?.onMessage || !isLoggingLevel(p.level) || !logLevelAtLeast(p.level, run.logLevel ?? DEFAULT_FORWARD_LOG_LEVEL)) return;
+      run.onMessage({ level: p.level, ...(typeof p.logger === 'string' ? { logger: p.logger } : {}), data: p.data });
+    });
     s.client.onclose = () => {
       if (this.closingSessions.has(s) || this.session !== s) return;
       this.session = undefined;
@@ -391,15 +416,12 @@ export class LegacyConnector implements UpstreamConnector {
     });
   }
 
-  async callTool(
-    params: { name: string; arguments?: Record<string, unknown>; _meta?: Record<string, unknown> },
-    ctx: CallContext,
-  ): Promise<Record<string, unknown>> {
+  async callTool(params: CallToolParams, ctx: CallContext): Promise<Record<string, unknown>> {
     const callerToken = progressTokenOf(params._meta);
     const run = this.runFor(ctx, callerToken);
     try {
       // 11.7: tools/call은 재시도하지 않는다 (401 뒤 1회 제외). 404면 재초기화만 하고 오류를 돌려준다.
-      return await this.request({ method: 'tools/call', params }, run, false);
+      return await this.request({ method: 'tools/call', params: { ...params } }, run, false);
     } finally {
       run.clock.dispose();
     }
@@ -449,6 +471,8 @@ export class LegacyConnector implements UpstreamConnector {
       clock: createRequestClock({ signal: ctx.signal, totalMs }),
       idleMs,
       totalMs,
+      onMessage: ctx.onMessage,
+      logLevel: ctx.logLevel ?? DEFAULT_FORWARD_LOG_LEVEL,
       onProgress:
         callerToken !== undefined
           ? (p) => {
@@ -483,14 +507,17 @@ export class LegacyConnector implements UpstreamConnector {
     for (;;) {
       const s = await this.ensureSession();
       try {
-        const result = await s.client.request(req as Request, ResultSchema, {
-          signal: run.clock.signal,
-          timeout: run.idleMs,
-          resetTimeoutOnProgress: true,
-          ...(run.totalMs !== undefined ? { maxTotalTimeout: run.totalMs } : {}),
-          // onprogress를 항상 달아야 SDK가 progressToken을 붙이고 유휴 타이머를 리셋한다. 전달은 다운스트림 토큰이 있을 때만.
-          onprogress: (p) => run.onProgress?.(p),
-        });
+        // 요청만 로그 문맥 안에서 보낸다 (세션 열기는 위에서 문맥 밖에서 끝났다, D1)
+        const result = await this.logScope.run(run, () =>
+          s.client.request(req as Request, ResultSchema, {
+            signal: run.clock.signal,
+            timeout: run.idleMs,
+            resetTimeoutOnProgress: true,
+            ...(run.totalMs !== undefined ? { maxTotalTimeout: run.totalMs } : {}),
+            // onprogress를 항상 달아야 SDK가 progressToken을 붙이고 유휴 타이머를 리셋한다. 전달은 다운스트림 토큰이 있을 때만.
+            onprogress: (p) => run.onProgress?.(p),
+          }),
+        );
         return result as Record<string, unknown>;
       } catch (e) {
         const err = classifyLegacyError(e, s.auth, run.clock);

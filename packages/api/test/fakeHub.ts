@@ -200,6 +200,7 @@ export const FAKE_HUB_CONFIG: HubConfig = {
   eventRetentionDays: 180,
   agentTokenGraceMs: 900_000,
   healthIntervalMs: 600_000,
+  forwardLogMessages: true,
   presetsDir: '/tmp/omnicode-api-test/presets',
   version: '0.1.0-test',
 };

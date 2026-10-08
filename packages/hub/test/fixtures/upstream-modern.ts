@@ -51,6 +51,8 @@ export interface ModernFixture {
   readonly cancelledCalls: number;
   /** ask 도구가 받은 { inputResponses, requestState } */
   readonly inputResponsesSeen: unknown[];
+  /** 'log' 도구가 받은 _meta logLevel (없으면 undefined) */
+  readonly logLevelsSeen: unknown[];
   close(): Promise<void>;
 }
 
@@ -102,6 +104,7 @@ export async function startModernFixture(opts: ModernFixtureOptions = {}): Promi
   const requests: ModernRecordedRequest[] = [];
   const listenRequests: Array<Record<string, unknown>> = [];
   const inputResponsesSeen: unknown[] = [];
+  const logLevelsSeen: unknown[] = [];
   const listeners = new Set<{ res: ServerResponse; keepalive: ReturnType<typeof setInterval> }>();
   let supportedVersions = opts.supportedVersions ?? ['2026-07-28'];
   let unauthorized: { www: string | null; status: number } | null = null;
@@ -189,6 +192,24 @@ export async function startModernFixture(opts: ModernFixtureOptions = {}): Promi
             ],
           },
         });
+        return;
+      }
+      case 'log': {
+        // 2026-07-28: 요청 _meta 에 logLevel 이 있을 때만 그 수준 이상의 로그를 보낸다 (D1)
+        const level = meta['io.modelcontextprotocol/logLevel'];
+        logLevelsSeen.push(level);
+        const order = ['debug', 'info', 'notice', 'warning', 'error', 'critical', 'alert', 'emergency'];
+        const messages = Array.isArray(args.messages) ? (args.messages as Array<{ level: string; data: unknown }>) : [];
+        sseStart(res);
+        if (typeof level === 'string') {
+          for (const m of messages) {
+            if (order.indexOf(m.level) >= order.indexOf(level)) {
+              sseEvent(res, { jsonrpc: '2.0', method: 'notifications/message', params: { level: m.level, logger: 'fixture', data: m.data } });
+            }
+          }
+        }
+        sseEvent(res, { jsonrpc: '2.0', id, result: { resultType: 'complete', content: [{ type: 'text', text: `logged` }] } });
+        res.end();
         return;
       }
       case 'big': {
@@ -378,6 +399,7 @@ export async function startModernFixture(opts: ModernFixtureOptions = {}): Promi
       return cancelledCalls;
     },
     inputResponsesSeen,
+    logLevelsSeen,
     async close() {
       for (const l of listeners) {
         clearInterval(l.keepalive);
