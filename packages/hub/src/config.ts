@@ -28,6 +28,7 @@ export const ENV = {
   agentTokenGraceMs: 'OMNICODE_AGENT_TOKEN_GRACE_MS',
   healthIntervalMs: 'OMNICODE_HEALTH_INTERVAL_MS',
   forwardLogMessages: 'OMNICODE_MCP_FORWARD_LOG_MESSAGES',
+  cimdEnabled: 'OMNICODE_OAUTH_CIMD',
   presetsDir: 'OMNICODE_PRESETS_DIR',
 } as const;
 
@@ -111,6 +112,7 @@ const HubConfigSchema = z.object({
   agentTokenGraceMs: z.number().int().min(0).max(24 * 60 * 60 * 1000),
   healthIntervalMs: z.number().int().min(5_000).max(24 * 60 * 60 * 1000),
   forwardLogMessages: z.boolean(),
+  cimdEnabled: z.boolean(),
   presetsDir: absolutePath('presets dir'),
   version: z.string().min(1),
 });
@@ -168,6 +170,7 @@ export function loadHubConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
     agentTokenGraceMs: readInt(env, ENV.agentTokenGraceMs, problems) ?? DEFAULTS.agentTokenGraceMs,
     healthIntervalMs: readInt(env, ENV.healthIntervalMs, problems) ?? DEFAULTS.healthIntervalMs,
     forwardLogMessages: readBool(env, ENV.forwardLogMessages, problems) ?? true,
+    cimdEnabled: readBool(env, ENV.cimdEnabled, problems) ?? true,
     presetsDir: readStr(env, ENV.presetsDir) ?? defaultPresetsDir(),
     version: readPackageVersion(),
   };

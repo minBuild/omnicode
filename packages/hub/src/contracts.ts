@@ -59,6 +59,11 @@ export interface HubConfig {
   healthIntervalMs: number;
   /** 업스트림 notifications/message 를 다운스트림 요청 스트림으로 전달할지 (D1, 11.3). 기본 true */
   forwardLogMessages: boolean;
+  /**
+   * OAuth 클라이언트 등록에 CIMD 를 쓸지 (10.3). 기본 true.
+   * 인가 서버가 publicUrl 의 CIMD 문서를 가져갈 수 없는 배포(Tailscale 전용 ts.net 등)는 false 로 두면 DCR·직접 입력으로 넘어간다.
+   */
+  cimdEnabled: boolean;
   presetsDir: string;
   version: string;
 }

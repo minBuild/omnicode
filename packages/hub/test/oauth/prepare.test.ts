@@ -98,6 +98,18 @@ describe('OAuthManager.prepare — discovery and registration precedence (10.3)'
     await expect(env.manager.start(server.id)).rejects.toMatchObject({ code: 'oauth_not_applicable' });
   });
 
+  it('skips CIMD when disabled (tailnet-only deployment the AS cannot reach) and uses DCR', async () => {
+    const auth = await as({ cimd: true, dcr: true });
+    const env = createEnv({ config: { cimdEnabled: false } });
+    const server = addServer(env, auth);
+
+    const result = await env.manager.prepare(server.id);
+
+    expect(result.clientMode).toBe('dcr');
+    expect(auth.count('/register')).toBe(1);
+    expect(env.secrets.oauth(secretRefOf(server.id)).client_id).not.toBe(CIMD_CLIENT_ID);
+  });
+
   it('falls back to DCR and persists the registration, including registration_access_token', async () => {
     const auth = await as({ dcr: true, prm: { scopes: ['tts'] } });
     const env = createEnv();

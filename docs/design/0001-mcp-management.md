@@ -2,7 +2,7 @@
 
 | 항목 | 내용 |
 |---|---|
-| 상태 | 개정 1 (v0.2) — 구현 착수 가능 |
+| 상태 | 개정 1 (v0.2) + Phase 1 구현 반영 (2026-10-08) — 인증은 [0002](0002-auth.md) |
 | 작성일 | 2026-10-07 (초안 · 개정 1 같은 날) |
 | 작성 | @minBuild (초안: Claude Opus 5.5 / 개정 1: Claude Fable 5.1) |
 | 대상 MCP 스펙 | 2026-07-28 (2025-11-25 이하 서버·클라이언트와 호환 유지) |
@@ -124,7 +124,7 @@ flowchart LR
     end
 
     subgraph AWS["내 AWS 계정"]
-        CF["CloudFront<br/>로그인 벽 + 공개 경로 2개"]
+        CF["CloudFront<br/>TLS·캐시 (인증은 API, 0002)"]
         SM[("Secrets Manager<br/>omnicode/*")]
         subgraph EC2["EC2"]
             subgraph U1["사용자 omnicode"]
@@ -262,7 +262,9 @@ sequenceDiagram
 |---|---|---|
 | `/var/lib/omnicode/` | `omnicode:omnicode` 0700 | `registry.sqlite`, 백업 임시 파일 |
 | `/etc/omnicode/omnicode.env` | `root:omnicode` 0640 | 비밀 아닌 설정 (8.5) |
-| `/run/omnicode/agentd.sock` | `omniagent:omnicode` 0660 | agentd 소켓. `omnicode`만 접속 가능 |
+| `/run/omnicode/agentd.sock` | `omniagent:omnicode` 0660 | agentd 소켓. systemd `omnicode-agentd.socket`이 만들어 fd 3으로 넘긴다 (17.1). `omnicode` 그룹만 접속 가능 |
+| `/var/lib/omnicode/auth.sqlite` | `omnicode` 0600 | 패스키·세션 (설계 0002 4장) |
+| `/var/lib/omnicode/setup-token` | `omnicode` 0600 | 첫 패스키 등록용 1회 토큰. 패스키가 생기면 지운다 (0002 5.1) |
 | `/home/omniagent/` | `omniagent` 0700 | CLI 설정, 작업 디렉터리 |
 | `/home/omniagent/.omnicode/tokens/{claude,codex,gemini}` | `omniagent` 0600 | 에이전트 토큰 (한 줄, 개행 없음) |
 | `/home/omniagent/.omnicode/env.sh` | `omniagent` 0600 | SSH 셸용 토큰 환경변수 (12.6) |
@@ -276,10 +278,10 @@ sequenceDiagram
 
 | 접점 | 요구 사항 |
 |---|---|
-| 인증 미들웨어 | `requireSession()` (OmniCode 로그인), `requireRecentAuth({ maxAgeSeconds: 300 })` (패스키 등 재인증). 네트워크 위치를 신뢰하지 않고 쿠키·토큰을 직접 검증한다 |
+| 인증 미들웨어 | **구현됨 — [0002](0002-auth.md).** `requireSession` (패스키 로그인 세션 쿠키), `requireRecentAuth` (5분 이내 패스키 재인증), `sessionIdOf`. Fastify `onRequest` 에서 실행되고 네트워크 위치를 신뢰하지 않는다 |
 | 에이전트 러너 | 에이전트를 `omniagent`로 실행한다. 실행 직전에 토큰 파일을 읽어 `OMNICODE_HUB_TOKEN_CODEX`·`OMNICODE_HUB_TOKEN_GEMINI` 환경변수를 넣고, 작업 ID를 `OMNICODE_JOB_ID`로 넣는다 (12.6). 러너를 agentd에 합쳐도 된다 |
 | 설치 스크립트 | 사용자·디렉터리·systemd 유닛·iptables 유닛·IMDSv2 설정·IAM 정책·CloudFront 동작 2개·초기 에이전트 토큰 생성 (17.6) |
-| CloudFront | 로그인 벽. 예외 경로는 `/.well-known/omnicode/client.json`과 `/oauth/callback` 두 개뿐 (10.3) |
+| CloudFront | TLS·캐시만. 엣지 인증은 하지 않는다 (0002 7장). `/api/*`·`/oauth/callback`은 캐시 없이 쿠키·쿼리·헤더를 그대로 전달, CIMD 문서는 1시간 캐시 (`infra/cloudfront/README.md`) |
 | Web 프레임워크 | 기존 API·UI 프레임워크를 따른다. 정해진 것이 없으면 API는 Fastify, UI는 기존 OmniCode 스택 |
 
 ### 8.4 패키지 구조
@@ -302,7 +304,7 @@ packages/
   web/           # 화면 (기존 Web UI에 MCP 라우트 추가)
   tools/         # omnicode-hub-headers 등 작은 실행 파일
 presets/         # <id>.json + schema.json
-infra/           # systemd 유닛, iptables 유닛, tmpfiles, 설치 스크립트 조각, CloudFront 설정 조각
+infra/           # systemd 유닛(agentd 는 .socket 활성화), iptables 가드, 백업·배포 스크립트, 설치 스크립트 조각, CloudFront 설정
 ```
 
 주요 의존성: `@modelcontextprotocol/sdk` 1.32.x (2025-11-25까지 지원), Node 내장 `node:sqlite` (네이티브 빌드 없음, Node 22.13 이상), `undici`, `ipaddr.js`, `jsonc-parser` (주석 보존 JSON 편집), `smol-toml` (TOML 파싱·검증 전용), `zod`, `@aws-sdk/client-secrets-manager`, `pino`.
@@ -506,7 +508,7 @@ sequenceDiagram
 - 인가 서버에서 돌아오는 리다이렉트는 교차 사이트 최상위 이동이라 `SameSite=Strict` 쿠키가 실리지 않는다.
 - iOS 홈 화면 앱(PWA)은 Safari와 쿠키 저장소가 분리될 수 있어 콜백이 다른 브라우저 컨텍스트에 떨어진다.
 
-`state`가 서버 측에서 1회용·단기로 검증되므로 CSRF 방어는 충분하다. 시작 세션 ID는 감사용으로만 쓴다. 따라서 `/oauth/callback`은 CloudFront 로그인 벽의 **두 번째 공개 경로**다. 쿼리 문자열을 그대로 오리진에 전달해야 한다 (**확인[P8]**).
+`state`가 서버 측에서 1회용·단기로 검증되므로 CSRF 방어는 충분하다. 시작 세션 ID는 감사용으로만 쓴다. 따라서 `/oauth/callback`은 API가 세션 없이 처리하는 **공개 경로**다 (0002 5.4). CloudFront는 쿼리 문자열을 그대로 오리진에 전달해야 한다 (**확인[P8]**).
 
 **콜백 처리.**
 
@@ -649,7 +651,7 @@ Hub는 업스트림에는 MCP 클라이언트, 에이전트에는 MCP 서버다.
 
 | 업스트림 → Hub | 처리 |
 |---|---|
-| `notifications/progress`, `notifications/message` (요청 스트림 안) | 같은 다운스트림 요청 스트림으로 즉시 전달 |
+| `notifications/progress`, `notifications/message` (요청 스트림 안) | 같은 다운스트림 요청 스트림으로 즉시 전달. 문자열은 Hub 마스킹 사전을 거친다. message 는 에이전트가 `logging/setLevel` 로 정한 수준(없으면 info) 이상만 (D20) |
 | `tools/list_changed` 등 목록 변경 알림 | 11.5 |
 | 서버 발신 요청 `sampling/createMessage`, `elicitation/create`, `roots/list` (legacy) | JSON-RPC 오류 `-32601`로 응답. Hub는 `initialize`에서 이 capabilities를 광고하지 않으므로 정상 서버는 보내지 않는다 |
 | `resultType: "input_required"` (modern) | 11.4 |
@@ -1068,7 +1070,7 @@ export interface DesiredAgentConfig {
 
 ## 14. API
 
-화면용 API는 OmniCode 로그인(`requireSession`)이 필요하다. 예외는 `/oauth/callback`과 `/.well-known/omnicode/client.json` 두 경로뿐이다. Hub의 MCP 엔드포인트는 `127.0.0.1`에서만 열리고 API를 통해서만 제어한다.
+화면용 API는 OmniCode 로그인(`requireSession`, 설계 0002)이 필요하다. 예외는 `/oauth/callback`, `/.well-known/omnicode/client.json`, 그리고 로그인 자체를 위한 `/api/auth/status`·`setup/*`·`login/*`(0002 5.4)뿐이다. Hub의 MCP 엔드포인트는 `127.0.0.1`에서만 열리고 API를 통해서만 제어한다.
 
 ### 14.1 엔드포인트
 
@@ -1258,7 +1260,7 @@ ReadWritePaths=/var/lib/omnicode
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 ```
 
-`omnicode-agentd.service` (`User=omniagent`, `Group=omniagent`, `SupplementaryGroups=`, `RuntimeDirectory=omnicode`, `RuntimeDirectoryMode=0750`, `RuntimeDirectoryPreserve=yes`, `Restart=always`). 소켓 파일은 데몬이 만들고 `chgrp omnicode` + `chmod 0660`을 적용한다 (**확인[P10]**). `omnicode-agentd.service`는 `Before=omnicode.service`, `omnicode.service`는 `After=omnicode-agentd.service omnicode-imds-guard.service`.
+`omnicode-agentd.socket` (`ListenStream=/run/omnicode/agentd.sock`, `SocketUser=omniagent`, `SocketGroup=omnicode`, `SocketMode=0660`)이 소켓을 만들고 `omnicode-agentd.service` (`User=omniagent`, `Requires=omnicode-agentd.socket omnicode-imds-guard.service`, `Restart=always`)에 fd 3으로 넘긴다 (소켓 활성화, D23). 데몬은 소켓 파일을 만들거나 권한을 바꾸지 않는다. `omnicode.service`는 소켓 뒤에 시작하며 추가 그룹이 필요 없다 (**확인[P10]**).
 
 ### 17.2 네트워크 격리 (iptables)
 
@@ -1277,7 +1279,8 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 ### 17.3 상태 점검
 
 - Hub가 10분마다 `active`·`changed`·`error` 서버에 `tools/list`를 보낸다 (modern 응답의 `ttlMs`가 더 길면 그만큼 미룬다). 연속 2회 실패 → `error`. 성공 → `active`(해시 비교 후 `changed`일 수 있음).
-- `error` 서버는 지수 백오프(1분 → 최대 30분)로 재시도한다.
+- `error` 서버와 점검에 실패한 서버는 지수 백오프(1분 → 2 → 4 … → 최대 30분)로 재시도하고, 성공하면 원래 간격으로 돌아간다 (`services/health.ts`).
+- 점검과 `list_changed` 처리는 **기존 연결로 목록만 다시 받는다.** 업스트림을 다시 탐지(연결을 끊고 다시 맺기)하면 진행 중인 도구 호출이 끊기기 때문이다. 재탐지는 서버 추가, 키 입력, 사용자의 [다시 탐지]에서만 한다 (D21).
 - `/healthz`는 `{ ok, version, uptimeSec, agentd: "ok" | "down" }`을 돌려준다. systemd `Restart=always`가 1차 복구다.
 
 ### 17.4 백업 · 보존 · 마이그레이션
@@ -1296,13 +1299,14 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 
 1. 사용자 `omnicode`, `omniagent` 생성. `/home/omniagent` 0700. `/var/lib/omnicode` 0700.
 2. `/etc/omnicode/omnicode.env` 생성 (`OMNICODE_PUBLIC_URL` 등).
-3. systemd 유닛 3개와 tmpfiles 설치, iptables 규칙 영속화.
+3. systemd 유닛(`omnicode`, `omnicode-agentd.socket`·`.service`, IMDS 가드, 백업 타이머) 설치, iptables 규칙 영속화.
 4. `aws ec2 modify-instance-metadata-options --http-tokens required --http-put-response-hop-limit 1`.
 5. IAM 인스턴스 역할: `secretsmanager:GetSecretValue/PutSecretValue/CreateSecret/DeleteSecret/DescribeSecret` on `arn:…:secret:omnicode/*`, S3 백업 버킷 쓰기.
-6. 에이전트 토큰 3개 생성 → `omnicode/hub-tokens` → agentd `tokens.write`.
-7. CloudFront: `/.well-known/omnicode/client.json`(캐시 1시간)과 `/oauth/callback`(캐시 없음, 쿼리 문자열 전달)을 로그인 벽 예외로 추가 (**확인[P8]**).
+6. 에이전트 토큰 3개 생성 → `omnicode/hub-tokens` → agentd `tokens.write`. (`omnicode.service`가 첫 기동 때 자동으로 한다.)
+7. CloudFront: `/api/*`·`/oauth/callback`은 캐시 없음·전부 전달, `/.well-known/omnicode/client.json`은 1시간 캐시. 엣지 로그인 함수는 두지 않는다 (0002 7장, **확인[P8]**).
 8. `/usr/local/bin/omnicode-hub-headers` 설치. `omniagent`의 셸 프로필에 `~/.omnicode/env.sh` source 추가.
-9. Docker (Phase 2).
+9. 첫 패스키 안내: `sudo cat /var/lib/omnicode/setup-token` → `<공개 URL>/setup` (0002 5.1).
+10. Docker (Phase 2).
 
 ---
 
@@ -1339,7 +1343,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 | P5 | Hub 재시작 후 legacy 다운스트림 세 CLI가 404를 받고 재초기화하는지 | Hub 재시작 후 도구 호출 |
 | P6 | 전달한 progress로 Claude Code의 5분 유휴 타이머가 리셋되는지. 합성 progress가 필요한지 | 90초 가짜 도구 |
 | P7 | Fish Audio: PRM 제공 여부, 인가 서버의 CIMD·DCR 지원, scope, 음성 생성 소요 시간, `list_changed` 발신 여부, 세대 | 실제 서버에 probe |
-| P8 | CloudFront: 공개 경로 2개 동작, 콜백의 쿼리 문자열 보존, 로그인 벽이 콜백을 가로채지 않는지, PWA(iOS 홈 화면)에서 콜백 복귀 | 폰으로 실제 흐름 |
+| P8 | CloudFront: `/api/*`·콜백·CIMD 동작, 콜백의 쿼리 문자열 보존, 엣지 함수가 없는지, PWA(iOS 홈 화면)에서 콜백 복귀와 패스키 로그인 | 폰으로 실제 흐름 (`infra/cloudfront/README.md`의 확인 명령) |
 | P9 | iptables owner 규칙이 IMDSv2 토큰 요청까지 막는지. `omniagent`에서 `aws sts get-caller-identity` 실패 | 17.2 명령 |
 | P10 | agentd 소켓 권한: `omnicode`는 접속, 다른 사용자는 거부 | `socat`/작은 스크립트 |
 | P11 | ~~`jsonc-parser`로 … 편집~~ **완료 (2026-10-08):** agentd 어댑터 테스트로 확인. `jsonc-parser`의 `modify()`는 배열 마지막 항목 제거 시 파일을 깨뜨려 `parseTree`+`applyEdits` 기반 자체 편집으로 대체. TOML 블록 치환 결과는 `smol-toml` 파싱으로 검증 | 어댑터 단위 테스트 |
@@ -1361,7 +1365,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 | 8 | `packages/agentd` + `packages/hub/sync`: 소켓 서버, 어댑터 3종, 토큰 파일, 플래너 | 어댑터 단위 테스트, 실제 CLI 설정 파일로 E2E |
 | 9 | `packages/api`: 14장 라우트, CIMD 문서, 콜백·완료 페이지, 재인증 연동 | API 테스트, 오류 형식 |
 | 10 | `packages/web`: 15장 화면 1~6, 8 | 폰에서 S1·S2·S5 수행 |
-| 11 | `infra`: systemd·iptables·tmpfiles·설치 스크립트 조각·CloudFront 조각·IAM 정책 | 새 EC2에 설치해 17.2·P9·P10 통과 |
+| 11 | `infra`: systemd(소켓 활성화)·iptables·설치·배포 스크립트·CloudFront 문서·IAM 정책 | 새 EC2에 설치해 17.2·P9·P10 통과 |
 | 12 | 수용 테스트 19.4 | 전부 통과 |
 
 ### 19.2.1 구현 메모 (2026-10-08, Phase 1 1차 구현)
@@ -1369,10 +1373,13 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 19.2의 #1~#11이 1차 구현됐다 (수용 테스트 19.4는 실제 CLI·EC2 가 필요해 미수행). 설계와 달라진 점:
 
 - **`HubServers.get`은 비동기**다. OAuth 만료 시각과 "사전 등록 입력 필요" 여부를 시크릿에서 읽어야 하기 때문이다.
-- **agentd 소켓 그룹.** `RuntimeDirectory=omnicode`는 유닛의 사용자(omniagent)로 디렉터리를 소유시키므로 8.2의 `omniagent:omnicode` 소유는 systemd와 충돌한다. 대신 `omnicode.service`에 `SupplementaryGroups=omniagent`를 주고 소켓은 0660으로 둔다. agentd는 `chgrp` 실패를 경고로만 남긴다. 장기적으로는 systemd `.socket` 유닛(SocketUser/SocketGroup/SocketMode)으로 바꾸는 것이 깔끔하다.
-- **OAuth 매니저**는 "사전 등록 입력 필요"를 `oauth_client_mode = 'preregistered'` + 빈 `client_id`로 표현한다. `publicUrl`이 없으면 CIMD와 DCR을 모두 건너뛴다(리다이렉트 URI가 없으므로). 즉 Tailscale 전용 배포(미결 3)에서는 사전 등록만 가능하다.
+- **agentd 소켓 그룹.** ~~`RuntimeDirectory` 소유권 충돌을 `SupplementaryGroups=omniagent`로 우회~~ → **해결 (D7):** systemd `.socket` 유닛이 `omniagent:omnicode` 0660으로 소켓을 만들어 넘긴다 (D23).
+- **OAuth 매니저**는 "사전 등록 입력 필요"를 `oauth_client_mode = 'preregistered'` + 빈 `client_id`로 표현한다. `publicUrl`이 없으면 CIMD와 DCR을 모두 건너뛴다(리다이렉트 URI가 없으므로). session 인증(0002)은 `publicUrl`을 요구하므로 Tailscale 전용 배포도 `ts.net` 주소를 갖는다. 인가 서버가 그 주소의 CIMD 문서를 가져갈 수 없으니 `OMNICODE_OAUTH_CIMD=0`으로 CIMD를 끄고 DCR·직접 입력을 쓴다.
+- **OAuth 탐색 폴백 (D2).** PRM이 없고 origin의 RFC 8414·OIDC 메타데이터가 모두 깨끗한 4xx이면 2025-03-26 기본 엔드포인트(`/authorize`·`/token`·`/register`, issuer = origin)를 쓴다. 5xx·네트워크 오류로 판단할 수 없으면 폴백하지 않는다. 기본 `/register`가 404·405·501이면 client_id 입력을 요청한다. OIDC로만 찾은 인가 서버의 `authorization_response_iss_parameter_supported`·`revocation_endpoint`는 원문 JSON에서 보존한다. 메타데이터는 SDK 헬퍼 대신 주입된 fetch로 직접 읽는다 (D22).
 - **modern MRTR 재시도**의 `inputResponses`·`requestState`는 `tools/call` params의 최상위 필드로 그대로 전달된다(계약 타입보다 넓은 런타임 동작).
-- **`notifications/message`**(업스트림 로깅)는 커넥터가 소비하고 전달하지 않는다. 11.3 표와 다르며, Logging이 Deprecated라 보류했다.
+- **`notifications/message` (D1).** ~~전달하지 않음~~ → 요청 단위로 전달한다 (11.3, D20). legacy는 요청 스트림 메시지만 그 호출에 묶고 세션 스트림 메시지는 버린다. HTTP+SSE 전송은 모든 메시지가 세션 스트림으로 오므로 전달하지 않는다. `OMNICODE_MCP_FORWARD_LOG_MESSAGES=0`으로 끈다.
+- **인증 (A1).** 설계 [0002](0002-auth.md)로 구현했다. `OMNICODE_AUTH_MODE` 기본값은 session이고 `OMNICODE_PUBLIC_URL`이 필수다.
+- **Fastify 내장 4xx (D5)** 는 `invalid_json`(400)·`payload_too_large`(413)·`unsupported_media_type`(415)로 보고한다. 인증 훅이 `onRequest`라 인증 없는 큰 본문은 401이다.
 - **다운스트림 capabilities**는 업스트림을 미러링하되 `logging`은 항상 광고한다(`logging/setLevel` 수락 핸들러 등록 조건).
 - **합성 progress**(P6)는 다운스트림이 60초마다 보낸다. `progressToken`이 있을 때만.
 - **SQL 마이그레이션 파일**은 tsc가 dist로 복사하지 않아 `src/registry/migrations`를 함께 배포해야 한다.
@@ -1424,6 +1431,11 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 | D16 | `needs_auth`·`error`에서도 승인된 도구 목록을 유지 | 빈 목록 | 에이전트가 호출해야 사용자 안내 문구(G7)가 전달됨 |
 | D17 | SDK는 legacy 세대 전담, modern 업스트림은 자체 클라이언트, modern 다운스트림은 MVP 미지원 | SDK 지원을 기다림, 전부 자체 구현 | SDK 1.32.1이 2025-11-25까지만 지원 (P1). CLI들도 legacy이므로 다운스트림 modern은 당장 필요 없음 |
 | D18 | SQLite는 Node 내장 `node:sqlite` | `better-sqlite3` | 네이티브 빌드 없음. Node 22.13 이상이면 충분 |
+| D19 | 인증은 패스키 전용, API가 유일한 인증 경계 (설계 0002) | 비밀번호·OTP, CloudFront 엣지 함수 | 단일 사용자에게 가장 단순하고 강한 방법. 엣지 함수는 세션을 검증할 수 없어 이중 관리만 늘린다 |
+| D20 | legacy 업스트림 로그는 AsyncLocalStorage로 요청에 묶어 그 호출에만 전달 | 모든 세션에 방송, 진행 중 호출 하나에 추정 귀속 | SDK가 알림과 요청을 연결해 주지 않는다. 방송은 다른 에이전트에 로그가 새고, 추정은 동시 호출에서 틀린다 |
+| D21 | 상태 점검·`list_changed`는 재탐지하지 않고 기존 연결로 목록만 다시 받음 | 매번 재탐지 | 재탐지는 연결을 끊어 진행 중인 도구 호출을 실패시킨다 |
+| D22 | OAuth 메타데이터를 주입된 fetch로 직접 읽고, "없음"이 확실할 때만 기본 엔드포인트로 폴백 | SDK 탐색 헬퍼 그대로 | SDK 헬퍼는 네트워크 오류를 "없음"으로 보고해 장애 중에 엉뚱한 엔드포인트로 폴백한다 |
+| D23 | agentd 소켓은 systemd 소켓 활성화 | `RuntimeDirectory` + 추가 그룹 우회 | 소유권 충돌 없이 `omniagent:omnicode` 0660을 보장하고, API는 추가 그룹이 필요 없다 |
 
 ---
 
@@ -1431,7 +1443,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 
 1. **엔드포인트 방식** — 서버별(현재안) vs 통합 엔드포인트(도구 이름에 서버 접두사, CLI 설정 변경 없이 추가·삭제 가능). Phase 0에서 각 CLI의 `list_changed` 지원 범위(P2~P4)를 보고 결정한다.
 2. **OAuth 토큰 저장소** — 서버 수가 수십 개를 넘으면 단일 시크릿 또는 KMS로 암호화한 DB 컬럼으로 바꿀지.
-3. **CIMD 공개 경로** — Tailscale 전용 배포에서 CIMD를 쓸 수 없을 때, DCR과 사전 등록만으로 충분한지. Fish Audio가 둘 중 무엇을 지원하는지(P7)가 첫 데이터다.
+3. **CIMD 공개 경로** — Tailscale 전용 배포는 `OMNICODE_OAUTH_CIMD=0`으로 CIMD를 끄고 DCR·사전 등록을 쓴다 (19.2.1). 이것으로 충분한지는 Fish Audio가 무엇을 지원하는지(P7)가 첫 데이터다.
 4. **elicitation 화면 처리** — Hub가 `input_required`를 받아 OmniCode 화면에서 사용자에게 묻고 재시도하는 방식 (Phase 3).
 5. **레지스트리 소스** — 공식 MCP Registry는 preview 상태이고 다운스트림 aggregator 사용이 권장된다. 설정 가능한 OpenAPI 호환 엔드포인트로 둘 예정.
 6. **stdio 샌드박스 기술** — Docker vs bubblewrap 등. 네트워크 허용 정책.
@@ -1466,5 +1478,6 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 | 날짜 | 내용 |
 |---|---|
 | 2026-10-07 | 초안 작성 |
+| 2026-10-08 | 핸드오프 A1·D1~D9 반영: 인증은 0002로 분리, 로그 전달(11.3), 상태 점검(17.3), 소켓 활성화(17.1), OAuth 폴백·CIMD 끄기(19.2.1), D19~D23 |
 | 2026-10-08 | Phase 1 1차 구현 반영: 19.2.1 구현 메모, P1·P11 완료 표시, D17·D18 |
 | 2026-10-07 | 개정 1. 신뢰 경계·위협 모델(7장) 신설, 사용자 분리와 IMDS 차단, 에이전트별 토큰, agentd, Hub 프로토콜 동작(11장: 세대 브리징·MRTR 정책·헤더·타임아웃·오류 코드), 동기화 어댑터 쓰기 안전과 헤드리스 승인 결정, OAuth 콜백 쿠키 독립·refresh 단일 비행·시크릿 형식 보강, 데이터 모델·API·테스트 전략·Phase 0 검증 목록·작업 순서·결정 기록 추가. 사실 정정: Gemini 설정의 환경변수 확장은 문서화됨, Claude Code의 빈 값 처리 변수는 고정 목록, Codex 문서 링크 이동 |

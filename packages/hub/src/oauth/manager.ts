@@ -152,7 +152,8 @@ export function createOAuthManager(deps: OAuthManagerDeps): HubOAuthManager {
 
   const base = publicBase(config.publicUrl);
   const redirectUri = base ? `${base}${CALLBACK_PATH}` : null;
-  const cimdClientId = base && base.startsWith('https://') ? `${base}${CIMD_PATH}` : null;
+  // CIMD 는 인가 서버가 이 URL 을 직접 가져갈 수 있어야 한다. tailnet 전용 배포는 cimdEnabled=false (10.3)
+  const cimdClientId = config.cimdEnabled !== false && base && base.startsWith('https://') ? `${base}${CIMD_PATH}` : null;
   const publicHost = base ? new URL(base).host : null;
 
   // ---------------------------------------------------------------- 도우미

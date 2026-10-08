@@ -201,6 +201,7 @@ export const FAKE_HUB_CONFIG: HubConfig = {
   agentTokenGraceMs: 900_000,
   healthIntervalMs: 600_000,
   forwardLogMessages: true,
+  cimdEnabled: true,
   presetsDir: '/tmp/omnicode-api-test/presets',
   version: '0.1.0-test',
 };

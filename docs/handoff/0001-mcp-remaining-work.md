@@ -2,9 +2,37 @@
 
 | 항목 | 내용 |
 |---|---|
-| 기준 커밋 | `2e4b8ff` (2026-10-08, main) |
+| 기준 커밋 | `2e4b8ff` (2026-10-08, main) — 진행 현황은 아래 표 |
 | 설계문서 | [`docs/design/0001-mcp-management.md`](../design/0001-mcp-management.md) — 장 번호는 모두 이 문서 기준 |
 | 대상 | 이 문서만 읽고 바로 이어서 작업할 구현자 (사람 또는 코딩 에이전트) |
+
+## 진행 현황 (2026-10-08 갱신)
+
+| 항목 | 상태 | 커밋 |
+|---|---|---|
+| A1 운영 인증 | **완료** — 설계 [0002](../design/0002-auth.md), 패스키 로그인·세션·재인증, 화면 | `1389f77`, `bd642aa` |
+| A2 Phase 0 검증 (P2~P10, P12) | 남음 — 실제 CLI·EC2·폰 필요 | — |
+| A3 수용 테스트 | 남음 — A2 뒤 | — |
+| A4 실제 배포 | 남음 — 설치 스크립트는 정적 검사·스텁 실행까지만 검증 | — |
+| D1 업스트림 로그 전달 | **완료** (마스킹, 수준 필터, legacy 는 AsyncLocalStorage 로 호출에 귀속) | `23e3876` |
+| D2 OAuth 폴백 | **완료** | `635cf7e` |
+| D3 SSE 도구 호출 테스트 | **완료** (SSE 경로 버그 2건 수정, 테스트는 `legacy-sse.test.ts`) | `8f10f7f` |
+| D4 Claude 어댑터 재검증 | **완료** | `6868b11` |
+| D5 API 다듬기 | **완료** (Fastify 4xx 코드, `OMNICODE_WEB_LIVE`, 인증 훅 `onRequest`) | `1389f77` |
+| D6 웹 DOM 테스트 | **완료** (vitest `web-dom` 프로젝트, jsdom) | `bd642aa` |
+| D7 agentd 소켓 활성화 | **완료** | `a794cf4` |
+| D8 상태 점검 | **완료** + 버그 수정: 점검·`list_changed`가 진행 중 호출을 끊던 문제 | `23e3876` |
+| D9 계약 확장 | **완료** | `23e3876` |
+| D10 modern 다운스트림 | 보류 — SDK 1.32.1 이 아직 2026-07-28 미지원 (2026-10-08 확인) | — |
+| C·D (Phase 2·3) | 남음 | — |
+
+이번 작업에서 새로 알게 된 것 (설계 0001 19.2.1·20장에 반영):
+
+- **Tailscale 전용 배포와 CIMD.** session 인증에 공개 URL이 필수라 tailnet 배포도 `ts.net` 주소를 갖는다. 인가 서버가 그 CIMD 문서를 가져갈 수 없으므로 `OMNICODE_OAUTH_CIMD=0`을 추가했다.
+- **SSE 스트림 유실 (미해결).** HTTP+SSE 업스트림이 스트림을 닫으면 진행 중 호출은 유휴 타임아웃(기본 5분)까지 기다리고, SDK가 `initialize` 없이 새 세션으로 조용히 다시 붙는다. `onClose`도 오지 않는다. 엄격한 서버는 그 세션을 거부할 수 있다. 커넥터 풀 복구 방식을 바꿔야 해서 설계 판단이 먼저다.
+- **세션 열기 중 취소.** 두 전송 모두 세션을 여는 동안에는 `ctx.signal` 취소를 따르지 않는다 (SSE 는 이제 시간 상한은 있다).
+- **Linux 의 fd 3.** agentd 가 띄우는 CLI 에 상속된 fd 3 이 넘어갈 수 있다 (Node 가 close-on-exec 를 걸 수 없다). `LISTEN_*` 는 지우므로 해는 없지만 Linux 에서 확인하지 못했다.
+- **systemd 유닛 검증.** `systemd-analyze verify`를 돌리지 못했다 (로컬에 systemd 없음). A4 때 확인한다.
 
 ---
 
@@ -24,7 +52,7 @@
 ```bash
 npm install
 npx tsc -b                               # 타입 검사 (web 제외)
-npx vitest run                           # 39 파일 / 544 테스트
+npx vitest run                           # 49 파일 / 655 테스트 (node + web-dom 프로젝트)
 npm run build                            # tsc + 마이그레이션 .sql 복사
 npm run build --workspace @omnicode/web  # Vite 빌드 (인라인 스크립트 없어야 함)
 npm run validate:presets

@@ -310,6 +310,7 @@ export function makeConfig(overrides: Partial<HubConfig> = {}): HubConfig {
     agentTokenGraceMs: DEFAULTS.agentTokenGraceMs,
     healthIntervalMs: DEFAULTS.healthIntervalMs,
     forwardLogMessages: true,
+    cimdEnabled: true,
     presetsDir: '/tmp/omnicode-test/presets',
     version: '0.1.0-test',
     ...overrides,

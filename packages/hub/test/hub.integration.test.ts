@@ -59,6 +59,7 @@ describe('hub integration (legacy upstream)', () => {
       agentTokenGraceMs: 60_000,
       healthIntervalMs: 600_000,
       forwardLogMessages: true,
+      cimdEnabled: true,
       presetsDir: new URL('../../../presets', import.meta.url).pathname,
       version: 'test',
     };

@@ -37,6 +37,7 @@ describe('loadHubConfig', () => {
       agentTokenGraceMs: 900_000,
       healthIntervalMs: DEFAULTS.healthIntervalMs,
       forwardLogMessages: true,
+      cimdEnabled: true,
       version: pkgVersion,
     });
     expect(path.isAbsolute(c.presetsDir)).toBe(true);
@@ -91,6 +92,7 @@ describe('loadHubConfig', () => {
     expect(loadHubConfig({ [ENV.secretsBackend]: 'memory' }).secretsBackend).toBe('memory');
     expect(loadHubConfig({}).forwardLogMessages).toBe(true);
     expect(loadHubConfig({ [ENV.forwardLogMessages]: '0' }).forwardLogMessages).toBe(false);
+    expect(loadHubConfig({ [ENV.cimdEnabled]: 'false' }).cimdEnabled).toBe(false);
   });
 
   it('normalizes the public URL and allows loopback http only in dev mode', () => {
