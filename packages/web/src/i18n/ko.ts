@@ -1,0 +1,391 @@
+/**
+ * 화면 문자열 — 모두 여기에 둔다. 설계문서 15장의 용어를 그대로 쓴다.
+ * 업스트림이 준 문자열(도구 이름·설명 등)은 이 파일을 거치지 않고 텍스트로만 렌더링한다.
+ */
+import type { Agent, AuthType, ProtocolEra, ServerStatus, SyncStatus, Transport, OAuthClientMode, EventKind } from '@omnicode/shared';
+import type { ApiErrorCode } from '@omnicode/shared';
+
+export const app = {
+  title: 'OmniCode MCP',
+  nav: { servers: 'MCP 서버', hub: 'Hub 상태', audit: '호출 기록' },
+  loading: '불러오는 중…',
+  retry: '다시 시도',
+  back: '뒤로',
+  close: '닫기',
+  cancel: '취소',
+  save: '저장',
+  confirm: '확인',
+  none: '없음',
+  unknown: '알 수 없음',
+  notFound: '페이지를 찾을 수 없습니다.',
+  goToList: 'MCP 목록으로',
+  requestFailed: '요청에 실패했습니다.',
+} as const;
+
+export const statusLabels: Record<ServerStatus, string> = {
+  draft: '확인 중',
+  needs_auth: '로그인 필요',
+  pending_approval: '승인 대기',
+  active: '연결됨',
+  changed: '변경 감지',
+  error: '오류',
+  disabled: '꺼짐',
+  deleting: '삭제 중',
+};
+
+/** needs_auth 중 scope step-up(10.3)인 경우의 배지 */
+export const scopeStepUpLabel = '추가 권한 필요';
+
+export const agentLabels: Record<Agent, string> = {
+  claude: 'Claude',
+  codex: 'Codex',
+  gemini: 'Gemini',
+};
+
+export const agentLongLabels: Record<Agent, string> = {
+  claude: 'Claude Code',
+  codex: 'Codex CLI',
+  gemini: 'Gemini CLI',
+};
+
+export const syncLabels: Record<SyncStatus, string> = {
+  synced: '동기화됨',
+  pending: '동기화 대기',
+  failed: '동기화 실패',
+};
+export const syncNoneLabel = '동기화 안 됨';
+
+export const transportLabels: Record<Transport, string> = {
+  streamable_http: 'Streamable HTTP',
+  sse: 'HTTP+SSE (사용 중단 예정)',
+  stdio: 'stdio',
+};
+
+export const eraLabels: Record<ProtocolEra, string> = {
+  legacy: '레거시 (2025-11-25 이전)',
+  modern: '최신 (2026-07-28 이후)',
+};
+
+export const authTypeLabels: Record<AuthType, string> = {
+  none: '인증 없음',
+  header: 'API 키 (헤더)',
+  oauth: 'OAuth',
+  stdio_env: '환경변수 (stdio)',
+};
+
+export const clientModeLabels: Record<OAuthClientMode, string> = {
+  cimd: 'CIMD (클라이언트 ID 메타데이터 문서)',
+  dcr: '동적 클라이언트 등록 (DCR)',
+  preregistered: '사전 등록 클라이언트',
+};
+
+export const outcomeLabels = {
+  ok: '성공',
+  error: '오류',
+  blocked: '차단',
+} as const;
+
+export const eventKindLabels: Record<EventKind, string> = {
+  'server.created': '서버 추가',
+  probe: '탐지',
+  'auth.started': '로그인 시작',
+  'auth.completed': '로그인 완료',
+  'auth.failed': '로그인 실패',
+  'tools.approved': '도구 승인',
+  'tools.changed': '도구 변경 감지',
+  'binding.changed': '바인딩 변경',
+  'sync.applied': '동기화 적용',
+  'sync.failed': '동기화 실패',
+  'server.disabled': '서버 끔',
+  'server.enabled': '서버 켬',
+  'server.deleted': '서버 삭제',
+  'token.rotated': 'Hub 토큰 재발급',
+  'health.error': '상태 점검 오류',
+  'credentials.saved': '자격증명 저장',
+  'server.updated': '서버 설정 변경',
+};
+
+/** 목록 API의 badges[] 문자열 → 표시 문구. 모르는 값은 그대로 보여준다. */
+export const badgeLabels: Record<string, string> = {
+  scope_stepup: scopeStepUpLabel,
+  insufficient_scope: scopeStepUpLabel,
+  private_host: '사설 주소',
+  legacy_transport: '레거시 전송',
+  deprecated_transport: '사용 중단 예정 전송',
+  preset: '프리셋',
+  http_loopback: 'HTTP 루프백',
+};
+
+export const annotationLabels = {
+  readOnlyHint: '읽기 전용',
+  destructiveHint: '파괴적',
+  idempotentHint: '멱등',
+  openWorldHint: '외부 접근',
+} as const;
+
+/** 14.3 — API 오류 코드 → 사용자 문구. 모든 ApiErrorCode를 빠짐없이 둔다. */
+export const errorMessages: Record<ApiErrorCode, string> = {
+  validation_error: '입력값이 올바르지 않습니다.',
+  invalid_url: 'https URL만 사용할 수 있습니다. 주소를 다시 확인하세요.',
+  ssrf_blocked: '사설 주소·내부 네트워크로는 연결할 수 없습니다.',
+  stale_tool_hash: '도구 정의가 그 사이 바뀌었습니다. 목록을 다시 확인한 뒤 승인하세요.',
+  oauth_state_invalid: 'OAuth 상태값이 유효하지 않거나 만료되었습니다. 로그인을 다시 시작하세요.',
+  oauth_issuer_mismatch: '인가 서버(issuer)가 기록된 값과 다릅니다. 로그인을 거부했습니다.',
+  oauth_denied: '인가 서버에서 로그인이 거부되었습니다.',
+  unauthenticated: 'OmniCode 로그인이 필요합니다. 페이지를 새로 고쳐 다시 로그인하세요.',
+  reauth_required: '보안을 위해 최근 5분 안의 재인증이 필요합니다. 다시 로그인한 뒤 시도하세요.',
+  forbidden: '이 작업을 수행할 권한이 없습니다.',
+  not_found: '대상을 찾을 수 없습니다.',
+  conflict: '같은 id의 서버가 이미 있습니다.',
+  invalid_transition: '현재 상태에서는 허용되지 않는 작업입니다.',
+  probe_failed: '서버 탐지에 실패했습니다. 주소와 서버 상태를 확인하세요.',
+  unsupported_transport: '지원하지 않는 전송 방식입니다.',
+  oauth_registration_failed: 'OAuth 클라이언트 등록에 실패했습니다. client_id를 직접 입력해야 할 수 있습니다.',
+  oauth_not_applicable: '이 서버는 OAuth 로그인을 사용하지 않습니다.',
+  agentd_unavailable: '에이전트 데몬(agentd)에 연결할 수 없습니다.',
+  sync_failed: 'CLI 설정 동기화에 실패했습니다.',
+  upstream_error: '업스트림 MCP 서버가 오류를 돌려주었습니다.',
+  internal: '서버 내부 오류가 발생했습니다.',
+};
+
+export const networkErrorMessage = '서버에 연결할 수 없습니다. 네트워크 상태를 확인하세요.';
+export const unexpectedResponseMessage = '서버 응답을 해석할 수 없습니다.';
+
+export const list = {
+  heading: 'MCP 서버',
+  add: '+ 추가',
+  empty: '등록된 MCP 서버가 없습니다. [+ 추가]로 시작하세요.',
+  privateHostsBanner: '사설 주소 허용 중',
+  privateHostsDetail: (hosts: string[]) => `허용 목록: ${hosts.join(', ')}`,
+  toolCount: (n: number) => `도구 ${n}개`,
+  approvedToolCount: (approved: number, total: number) => `도구 ${approved}/${total}개 승인`,
+  changedToolCount: (n: number) => `변경 ${n}개`,
+  agentsLegend: '에이전트 노출',
+  hubLink: 'Hub 상태',
+  auditLink: '호출 기록',
+  lastError: '마지막 오류',
+  updatedAt: '갱신',
+} as const;
+
+export const add = {
+  heading: 'MCP 서버 추가',
+  tabs: { url: 'URL', preset: '프리셋', json: 'JSON', search: '검색' },
+  jsonPhase: 'JSON 붙여넣기는 Phase 2에서 지원합니다.',
+  searchPhase: '레지스트리 검색은 Phase 3에서 지원합니다.',
+  urlLabel: '서버 URL',
+  urlPlaceholder: 'https://example.com/mcp',
+  urlHelp: 'https 주소만 사용할 수 있습니다. 사설 주소·localhost는 거부됩니다.',
+  idLabel: '서버 id (선택)',
+  idHelp: '소문자·숫자·하이픈 1~40자. 비우면 자동으로 정합니다.',
+  displayNameLabel: '표시 이름 (선택)',
+  submitUrl: '서버 확인',
+  presetsLoading: '프리셋을 불러오는 중…',
+  presetsEmpty: '사용할 수 있는 프리셋이 없습니다.',
+  presetDocs: '문서 보기',
+  presetUse: '이 프리셋으로 추가',
+  presetAuth: '인증',
+  presetDefaultAgents: '기본 에이전트',
+  stepProbe: '확인 중',
+  stepAuth: '인증',
+  stepReview: '도구 검토',
+  stepDone: '완료',
+  probing: '서버를 확인하는 중입니다…',
+  probeFailed: '서버 확인에 실패했습니다.',
+  reprobe: '다시 탐지',
+  era: '세대',
+  transport: '전송',
+  protocolVersion: '프로토콜 버전',
+  warnings: '주의',
+  needsAuthTitle: '로그인 필요',
+  needsAuthOauth: '이 서버는 OAuth 로그인이 필요합니다. 로그인하면 인가 서버로 이동했다가 OmniCode로 돌아옵니다.',
+  needsAuthHeader: '이 서버는 API 키가 필요합니다. 키는 Secrets Manager에 저장되고 화면에 다시 표시되지 않습니다.',
+  needsClientInput: '인가 서버가 자동 등록을 지원하지 않습니다. 발급받은 client_id(와 secret)를 입력하세요.',
+  login: (name: string) => `${name}(으)로 로그인`,
+  loginGeneric: '로그인',
+  loginStarting: '로그인 페이지로 이동하는 중…',
+  loginUrlRejected: '인가 URL이 https가 아니어서 이동을 거부했습니다.',
+  headerNameLabel: '헤더 이름',
+  headerValueLabel: '키 값',
+  saveCredentials: '키 저장',
+  credentialsSaved: '키를 저장했습니다. 서버를 다시 확인합니다.',
+  clientIdLabel: 'client_id',
+  clientSecretLabel: 'client_secret (선택)',
+  saveClient: '클라이언트 저장',
+  afterAuthHint: '로그인이 끝나면 서버 상세로 돌아옵니다. 이후 도구 검토를 이어서 할 수 있습니다.',
+  reviewIntro: '노출할 도구를 고르세요. 파괴적(destructive) 도구는 기본으로 꺼져 있습니다.',
+  destructiveFlag: '파괴적 도구',
+  noTools: '이 서버가 제공하는 도구가 없습니다.',
+  selectAll: '전체 선택',
+  selectNone: '전체 해제',
+  agentsTitle: '노출할 에이전트',
+  approve: '승인',
+  approving: '승인 중…',
+  approveNeedsAgent: '에이전트를 하나 이상 선택하세요.',
+  doneTitle: '추가 완료',
+  doneApproved: (n: number) => `${n}개 도구를 승인했습니다.`,
+  syncTitle: '에이전트 동기화 결과',
+  retrySync: '다시 시도',
+  goDetail: '서버 상세로',
+  goList: '목록으로',
+  continueFrom: (name: string) => `${name} 설정을 이어서 합니다.`,
+  statusError: '서버 탐지 중 오류가 났습니다.',
+  statusDraft: '아직 탐지가 끝나지 않았습니다.',
+  alreadyActive: '이미 승인된 서버입니다.',
+  staleTools: '도구 정의가 그 사이 바뀌어 목록을 다시 불러왔습니다. 확인 후 다시 승인하세요.',
+} as const;
+
+export const detail = {
+  heading: '서버 상세',
+  fromPreset: (id: string) => `프리셋 ${id}에서 추가됨`,
+  url: '주소',
+  canonicalUrl: '정규화 주소',
+  tools: '도구',
+  toolsEmpty: '도구가 없습니다.',
+  toolEnabled: '켬',
+  toolChanged: '변경됨',
+  toolPending: '승인 대기',
+  reviewChanges: '변경 내용 검토',
+  reviewPending: '도구 검토·승인',
+  connection: '연결 정보',
+  transport: '전송',
+  era: '세대',
+  protocolVersion: '협상 버전',
+  serverInfo: '업스트림 서버',
+  lastProbeAt: '마지막 탐지',
+  toolsSyncedAt: '도구 목록 갱신',
+  testConnection: '연결 테스트',
+  testing: '테스트 중…',
+  testOk: (ms: number | null) => (ms === null ? '연결 성공' : `연결 성공 · 왕복 ${ms}ms`),
+  testFailed: '연결 실패',
+  probe: '다시 탐지',
+  probing: '탐지 중…',
+  auth: '인증 정보',
+  authType: '방식',
+  headerName: '헤더 이름',
+  issuer: 'issuer',
+  clientMode: '클라이언트 등록',
+  requestedScope: '요청 scope',
+  grantedScope: '허용된 scope',
+  expiresAt: '토큰 만료',
+  relogin: '다시 로그인',
+  changeKey: '키 변경',
+  bindings: '에이전트 바인딩',
+  bindingsHelp: '바인딩을 바꾸면 해당 CLI 설정이 즉시 동기화됩니다.',
+  syncError: '오류',
+  syncedAt: '동기화 시각',
+  settings: '설정',
+  enabled: '서버 사용',
+  enabledHelp: '끄면 CLI 항목은 유지되지만 Hub가 빈 도구 목록을 돌려주고 호출을 막습니다.',
+  displayName: '표시 이름',
+  callTimeout: '호출 타임아웃 (초)',
+  callTimeoutHelp: '5초~3600초. 긴 작업이면 늘리세요.',
+  cliAutoApprove: 'CLI 자동 승인',
+  cliAutoApproveHelp: '켜면 CLI가 이 서버의 도구 호출을 사용자 확인 없이 실행합니다.',
+  events: '최근 이벤트',
+  eventsEmpty: '최근 이벤트가 없습니다.',
+  warnings: '주의',
+  lastError: '마지막 오류',
+  danger: '삭제',
+  deleteButton: '삭제',
+  deleteTitle: '서버 삭제',
+  deleteIntro: (id: string) => `삭제하면 모든 CLI에서 항목을 제거하고 토큰·시크릿을 즉시 폐기합니다. 확인을 위해 서버 id "${id}"를 입력하세요.`,
+  deleteInputLabel: '서버 id',
+  deleteConfirm: '삭제',
+  deleting: '삭제 중…',
+  deleteSteps: '삭제 단계',
+  deleteStepLabels: {
+    block: '호출 차단',
+    sync: 'CLI 항목 제거',
+    revoke: 'OAuth 토큰 폐기',
+    secret: '시크릿 삭제',
+    row: '레코드 삭제',
+  } as Record<string, string>,
+  deleteDone: '서버를 삭제했습니다.',
+  deleteRetry: '다시 시도',
+  forceDelete: '강제 삭제',
+  forceDeleteWarning: '강제 삭제는 재인증이 필요하며, CLI 설정 파일에 항목이 남을 수 있습니다.',
+  pendingBanner: '도구 승인이 아직 끝나지 않았습니다.',
+  changedBanner: (n: number) => `${n}개 도구의 정의가 바뀌었습니다. 재승인 전까지 바뀐 도구는 에이전트에 노출되지 않습니다.`,
+  needsAuthBanner: '업스트림 로그인이 필요합니다.',
+  scopeBanner: '서버가 추가 권한(scope)을 요구합니다. 다시 로그인하면 합집합 scope로 요청합니다.',
+  errorBanner: '업스트림에 연결하지 못했습니다.',
+  deletingBanner: '삭제가 진행 중입니다. 실패한 단계가 있으면 다시 시도하거나 강제 삭제할 수 있습니다.',
+  disabledBanner: '이 서버는 꺼져 있습니다.',
+  resync: '동기화 다시 시도',
+} as const;
+
+export const changes = {
+  heading: '변경 감지',
+  intro: '이전 승인본과 현재 정의를 비교합니다. 재승인하면 현재 정의가 새 승인본이 됩니다.',
+  none: '바뀐 도구가 없습니다.',
+  newTools: '새 도구',
+  newToolHint: '이전 승인본이 없는 새 도구입니다.',
+  previous: '이전 (승인본)',
+  current: '현재',
+  description: '설명',
+  inputSchema: '입력 스키마',
+  noDescription: '(설명 없음)',
+  reapprove: '재승인',
+  disableTool: '이 도구 끄기',
+  reapproveAll: '전체 재승인',
+  reapproved: '재승인했습니다.',
+  disabled: '도구를 껐습니다.',
+  backToDetail: '서버 상세로',
+} as const;
+
+export const hub = {
+  heading: 'Hub 상태',
+  version: 'Hub 버전',
+  uptime: '가동 시간',
+  endpoint: '엔드포인트',
+  sessions: '다운스트림 세션',
+  sessionsLegacy: '레거시',
+  sessionsModern: '최신',
+  agentd: 'agentd',
+  agentdOk: '연결됨',
+  agentdDown: '연결 안 됨',
+  agentdVersion: '버전',
+  cliVersions: 'CLI 버전',
+  cliMissing: '설치 안 됨',
+  lastSync: '마지막 동기화',
+  neverSynced: '아직 동기화한 적 없음',
+  resyncAll: '전체 재동기화',
+  resyncing: '동기화 중…',
+  resyncResult: '동기화 결과',
+  tokens: 'Hub 토큰',
+  rotatedAt: '마지막 재발급',
+  graceUntil: '이전 토큰 유예',
+  rotate: 'Hub 토큰 재발급',
+  rotating: '재발급 중…',
+  rotateAgents: '재발급할 에이전트',
+  rotateNotice: '실행 중인 작업은 15분 안에 재시작하세요. 이전 토큰은 그 뒤에 무효화됩니다.',
+  rotateNeedsAgent: '에이전트를 하나 이상 선택하세요.',
+  rotateDone: (at: string, grace: string) => `재발급 완료 (${at}). 이전 토큰 유예 종료: ${grace}`,
+  reauthNotice: '재인증이 필요합니다. 다시 로그인한 뒤 재발급을 시도하세요.',
+  privateHosts: '사설 주소 허용',
+  httpLoopback: 'HTTP 루프백 허용',
+  on: '켜짐',
+  off: '꺼짐',
+} as const;
+
+export const audit = {
+  heading: '호출 기록',
+  filterServer: '서버',
+  filterAgent: '에이전트',
+  filterOutcome: '결과',
+  all: '전체',
+  apply: '적용',
+  empty: '기록이 없습니다.',
+  more: '더 보기',
+  loadingMore: '불러오는 중…',
+  cols: {
+    time: '시각',
+    agent: '에이전트',
+    jobId: '작업 ID',
+    server: '서버',
+    tool: '도구',
+    outcome: '결과',
+    duration: '소요',
+    error: '오류',
+  },
+} as const;
