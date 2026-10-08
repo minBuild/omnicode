@@ -1,0 +1,177 @@
+/**
+ * 조립 통합 테스트: createHub ↔ 가짜 legacy 업스트림 ↔ SDK 클라이언트(에이전트 역할).
+ * 흐름: 추가 → pending_approval → 승인 → 동기화 → 에이전트 호출 → 감사 로그 → 끄기 → 삭제.
+ */
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { createMasker, type Agent, type AgentdStatus, type DesiredAgentConfig, type SyncResult } from '@omnicode/shared';
+import { createHub } from '../src/hub.js';
+import type { AgentdClient, Hub, HubConfig, HubTokensSecret } from '../src/contracts.js';
+import { openRegistry } from '../src/registry/index.js';
+import { createMemorySecretStore } from '../src/secrets/index.js';
+import { createLogger } from '../src/logger.js';
+import { startLegacyFixture, type LegacyFixture } from './fixtures/upstream-legacy.js';
+
+function fakeAgentd(): AgentdClient & { applied: Array<[Agent, DesiredAgentConfig]>; tokens: Partial<Record<Agent, string>> } {
+  const applied: Array<[Agent, DesiredAgentConfig]> = [];
+  const tokens: Partial<Record<Agent, string>> = {};
+  const ok = (d: DesiredAgentConfig): SyncResult => ({ added: d.entries.map((e) => e.name), updated: [], removed: [], unchanged: [] });
+  return {
+    applied,
+    tokens,
+    syncPlan: async (_a, d) => ok(d),
+    syncApply: async (a, d) => {
+      applied.push([a, d]);
+      return ok(d);
+    },
+    writeToken: async (a, t) => void (tokens[a] = t),
+    status: async (): Promise<AgentdStatus> => ({ version: 'fake', home: '/tmp', cli: { claude: '2.1', codex: null, gemini: null }, lastSync: { claude: null, codex: null, gemini: null } }),
+  };
+}
+
+describe('hub integration (legacy upstream)', () => {
+  let fixture: LegacyFixture;
+  let hub: Hub;
+  let agentd: ReturnType<typeof fakeAgentd>;
+  let port: number;
+  let tokens: HubTokensSecret;
+  const secrets = createMemorySecretStore();
+  const masker = createMasker();
+
+  beforeAll(async () => {
+    fixture = await startLegacyFixture();
+    agentd = fakeAgentd();
+    const config: HubConfig = {
+      publicUrl: 'https://omni.example',
+      hubHost: '127.0.0.1',
+      hubPort: 0,
+      dataDir: '/tmp/unused',
+      agentdSocket: '/tmp/unused.sock',
+      secretsPrefix: 'omnicode',
+      secretsBackend: 'memory',
+      callTimeoutMs: 10_000,
+      idleTimeoutMs: 5_000,
+      allowPrivateHosts: [],
+      allowHttpLoopback: true,
+      auditRetentionDays: 30,
+      eventRetentionDays: 180,
+      agentTokenGraceMs: 60_000,
+      healthIntervalMs: 600_000,
+      presetsDir: new URL('../../../presets', import.meta.url).pathname,
+      version: 'test',
+    };
+    hub = await createHub({
+      config,
+      deps: { registry: openRegistry(':memory:'), secrets, masker, agentd, port: 0, logger: createLogger(masker, { level: 'silent' }) },
+    });
+    await hub.start();
+    port = (await hub.status()).hub.port;
+    tokens = (await secrets.get<HubTokensSecret>('omnicode/hub-tokens'))!;
+  });
+
+  afterAll(async () => {
+    await hub.stop();
+    await fixture.close();
+  });
+
+  const agentClient = async (id: string, agent: Agent) => {
+    const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp/${id}`), {
+      requestInit: { headers: { Authorization: `Bearer ${tokens[agent]}`, 'X-OmniCode-Job': 'job-1' } },
+    });
+    const client = new Client({ name: 'claude-code-test', version: '0' });
+    await client.connect(transport);
+    return { client, transport };
+  };
+
+  it('adds a server, approves its tools, syncs agents, and serves calls through the hub', async () => {
+    const created = await hub.servers.create({ source: 'url', url: fixture.url, id: 'fake-legacy', displayName: 'Fake' });
+    expect(created.status).toBe('pending_approval');
+    expect(created.protocol.era).toBe('legacy');
+    expect(created.tools.map((t) => t.name).sort()).toEqual(['echo', 'fail', 'slow']);
+    expect(created.tools.every((t) => t.pendingApproval)).toBe(true);
+    expect(hub.presets().some((p) => p.id === 'fish-audio')).toBe(true);
+
+    // 승인 전에는 에이전트에게 아무것도 보이지 않고 호출은 -32011
+    const early = await agentClient('fake-legacy', 'claude');
+    expect((await early.client.listTools()).tools).toEqual([]);
+    await expect(early.client.callTool({ name: 'echo', arguments: { text: 'x' } })).rejects.toMatchObject({ code: -32011 });
+    await early.transport.terminateSession();
+
+    const approved = await hub.servers.approve('fake-legacy', {
+      tools: created.tools.map((t) => ({ name: t.name, schemaHash: t.schemaHash, enabled: t.name !== 'fail' })),
+      bindings: { claude: true, codex: true, gemini: false },
+    });
+    expect(approved.status).toBe('active');
+    expect(approved.sync.claude.status).toBe('synced');
+    const claudeDesired = agentd.applied.filter(([a]) => a === 'claude').at(-1)![1];
+    expect(claudeDesired.entries.map((e) => e.name)).toEqual(['omni-fake-legacy']);
+    expect(claudeDesired.entries[0]!.url).toBe(`http://127.0.0.1:0/mcp/fake-legacy`.replace(':0', `:${hub.config.hubPort}`));
+    expect(agentd.applied.filter(([a]) => a === 'gemini').at(-1)![1].entries).toEqual([]);
+
+    const { client, transport } = await agentClient('fake-legacy', 'claude');
+    expect((await client.listTools()).tools.map((t) => t.name).sort()).toEqual(['echo', 'slow']);
+    const res = await client.callTool({ name: 'echo', arguments: { text: 'hello' } });
+    expect(JSON.stringify(res)).toContain('hello');
+    await expect(client.callTool({ name: 'fail' })).rejects.toMatchObject({ code: -32011 });
+
+    const audit = hub.audit({ limit: 10 });
+    const ok = audit.items.find((a) => a.outcome === 'ok');
+    expect(ok).toMatchObject({ agent: 'claude', server_id: 'fake-legacy', tool: 'echo', job_id: 'job-1', method: 'tools/call' });
+    expect(audit.items.find((a) => a.outcome === 'blocked')?.error_code).toBe(-32011);
+
+    // gemini 는 바인딩이 꺼져 있다
+    const gem = await agentClient('fake-legacy', 'gemini');
+    expect((await gem.client.listTools()).tools).toEqual([]);
+    await expect(gem.client.callTool({ name: 'echo' })).rejects.toMatchObject({ code: -32018 });
+    await gem.transport.terminateSession();
+
+    // 끄기 → 라이브 세션은 빈 목록 + server_disabled
+    const disabled = await hub.servers.patch('fake-legacy', { enabled: false });
+    expect(disabled.status).toBe('disabled');
+    expect((await client.listTools()).tools).toEqual([]);
+    await expect(client.callTool({ name: 'echo' })).rejects.toMatchObject({ code: -32010 });
+    const enabled = await hub.servers.patch('fake-legacy', { enabled: true });
+    expect(enabled.status).toBe('active');
+    expect((await client.listTools()).tools.length).toBe(2);
+    await transport.terminateSession();
+
+    const test = await hub.servers.test('fake-legacy');
+    expect(test.ok).toBe(true);
+
+    const del = await hub.servers.delete('fake-legacy');
+    expect(del.status).toBe('deleted');
+    expect(del.steps.every((s) => s.ok)).toBe(true);
+    expect(await hub.servers.get('fake-legacy')).toBeUndefined();
+    expect(hub.events({ limit: 50 }).items.some((e) => e.kind === 'server.deleted')).toBe(true);
+  });
+
+  it('marks a 401 upstream as needs_auth without crashing', async () => {
+    fixture.setUnauthorized('Bearer resource_metadata="http://127.0.0.1:1/.well-known/oauth-protected-resource"');
+    try {
+      const d = await hub.servers.create({ source: 'url', url: fixture.url, id: 'needs-login' });
+      expect(d.status).toBe('needs_auth');
+      expect(d.authType).toBe('oauth');
+      expect(d.lastError).not.toBeNull();
+    } finally {
+      fixture.setUnauthorized(null);
+    }
+  });
+
+  it('rejects private and non-https urls at creation', async () => {
+    await expect(hub.servers.create({ source: 'url', url: 'https://10.0.0.5/mcp' })).rejects.toMatchObject({ name: 'SsrfBlockedError' });
+    await expect(hub.servers.create({ source: 'url', url: 'ftp://x.example/mcp' })).rejects.toMatchObject({ code: 'invalid_url' });
+  });
+
+  it('reports status and rotates tokens', async () => {
+    const st = await hub.status();
+    expect(st.agentd.ok).toBe(true);
+    expect(st.downstreamSessions.legacy).toBe(0);
+    const old = tokens.codex;
+    const r = await hub.tokens.rotate(['codex']);
+    expect(r.graceUntil > r.rotatedAt).toBe(true);
+    expect(hub.tokens.authenticate(old)).toBe('codex');
+    expect(agentd.tokens.codex).not.toBe(old);
+    expect(hub.tokens.authenticate(agentd.tokens.codex!)).toBe('codex');
+  });
+});

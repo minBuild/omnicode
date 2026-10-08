@@ -1,0 +1,20 @@
+{
+  "name": "@omnicode/hub",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": { "build": "tsc -b", "test": "vitest run" },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.1147.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "@omnicode/shared": "0.1.0",
+    "eventsource-parser": "^3.1.1",
+    "ipaddr.js": "^2.5.0",
+    "pino": "^10.4.0",
+    "undici": "^8.11.2",
+    "zod": "^3.25.0 || ^4.0.0"
+  }
+}
