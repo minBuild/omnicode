@@ -45,6 +45,7 @@ import {
   isRecord,
   mergeHeaders,
   protocolError,
+  timeoutError,
   unauthorizedError,
   unavailableError,
   type RequestClock,
@@ -119,7 +120,26 @@ export async function openLegacySession(
   // sampling·elicitation·roots 핸들러 없음 + capabilities 비움 → 서버 발신 요청은 SDK가 -32601로 답한다 (11.3)
   const client: LegacyClient = new Client({ ...HUB_CLIENT_INFO }, { capabilities: {} });
   client.onerror = (e) => opts.logger?.debug({ serverId: opts.serverId, err: describeError(e) }, 'upstream legacy client error');
-  await client.connect(transport, { timeout: o.timeoutMs, signal: o.signal });
+  const connecting = client.connect(transport, { timeout: o.timeoutMs, signal: o.signal });
+  if (kind === 'sse') {
+    // HTTP+SSE: start()는 endpoint 이벤트를 시간 제한 없이 기다린다(SDK timeout은 initialize에만 걸린다) → 열기 전체를 timeoutMs로 묶는다.
+    // 실패하면 닫는다: 그대로 두면 EventSource가 연결을 붙잡거나 3초마다 재연결한다.
+    // GET(EventSource)의 401·403은 SseError에 상태 코드만 남으므로 createSessionFetch가 기록한 WWW-Authenticate로 분류한다 (10.4).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(timeoutError('HTTP+SSE session open (endpoint event + initialize)', o.timeoutMs)), o.timeoutMs);
+    });
+    try {
+      await Promise.race([connecting, deadline]);
+    } catch (e) {
+      await client.close().catch(() => undefined);
+      throw e instanceof SseError ? classifyLegacyError(e, auth) : e;
+    } finally {
+      clearTimeout(timer);
+    }
+  } else {
+    await connecting;
+  }
   const serverInfo = client.getServerVersion();
   const capabilities = client.getServerCapabilities();
   const instructions = client.getInstructions();
