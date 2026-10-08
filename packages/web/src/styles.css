@@ -888,3 +888,50 @@ dialog {
 dialog::backdrop {
   background: rgba(0, 0, 0, 0.5);
 }
+
+/* --- 인증 화면 (설계 0002 9장) --------------------------------------- */
+.auth-main {
+  max-width: 480px;
+  margin-top: 32px;
+}
+.btn-block {
+  width: 100%;
+  justify-content: center;
+}
+.plain-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+}
+.row-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.row-item:last-child {
+  border-bottom: none;
+}
+.row-item > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+pre.command {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  font-size: 0.875rem;
+}
+.app-nav .nav-button {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}

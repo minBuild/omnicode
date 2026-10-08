@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { API_ERROR_STATUS, type ApiErrorCode } from '@omnicode/shared';
 import {
   ALL_AGENTS,
   defaultAgentSelection,
@@ -16,29 +17,8 @@ import {
 import { errorMessages, statusLabels } from '../src/i18n/ko';
 
 /** 14.3 + errors.ts의 모든 ApiErrorCode. 타입으로도 강제되지만 런타임에서도 빠짐없음을 확인한다. */
-const API_ERROR_CODES = [
-  'validation_error',
-  'invalid_url',
-  'ssrf_blocked',
-  'stale_tool_hash',
-  'oauth_state_invalid',
-  'oauth_issuer_mismatch',
-  'oauth_denied',
-  'unauthenticated',
-  'reauth_required',
-  'forbidden',
-  'not_found',
-  'conflict',
-  'invalid_transition',
-  'probe_failed',
-  'unsupported_transport',
-  'oauth_registration_failed',
-  'oauth_not_applicable',
-  'agentd_unavailable',
-  'sync_failed',
-  'upstream_error',
-  'internal',
-] as const;
+// 기준은 shared 의 API_ERROR_STATUS 다 (테스트에서만 런타임 import — 화면 번들은 import type 만 쓴다)
+const API_ERROR_CODES = Object.keys(API_ERROR_STATUS) as ApiErrorCode[];
 
 describe('status → badge label (15장 1번)', () => {
   it('maps every server status to the designed Korean label', () => {

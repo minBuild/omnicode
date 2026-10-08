@@ -88,6 +88,29 @@ export interface RequestOptions {
   query?: Record<string, string | number | boolean | null | undefined>;
   signal?: AbortSignal;
   fetchImpl?: FetchLike;
+  /** true 면 reauth_required 를 받아도 재인증 창을 띄우지 않는다 (재인증 요청 자체 등) */
+  skipReauth?: boolean;
+}
+
+/**
+ * 인증 가로채기 (설계 0002 9장). AuthProvider 가 등록한다.
+ * - reauth_required: 재인증 창을 띄우고, 성공하면 같은 요청을 한 번 다시 보낸다.
+ * - unauthenticated: 세션이 끝났음을 알린다 (로그인 화면으로 보낸다). /api/auth/* 응답에는 부르지 않는다.
+ */
+export interface AuthInterceptors {
+  onReauthRequired?: () => Promise<boolean>;
+  onUnauthenticated?: () => void;
+}
+
+let interceptors: AuthInterceptors = {};
+
+/** 가로채기를 등록한다. 돌려준 함수를 부르면 이전 값으로 되돌린다 */
+export function setAuthInterceptors(next: AuthInterceptors): () => void {
+  const prev = interceptors;
+  interceptors = next;
+  return () => {
+    interceptors = prev;
+  };
 }
 
 export function buildQuery(query: RequestOptions['query']): string {
@@ -131,7 +154,15 @@ export async function request<T>(method: HttpMethod, path: string, options: Requ
       throw new ApiClientError('unexpected_response', res.status, { serverMessage: `HTTP ${res.status}` });
     }
   }
-  if (!res.ok) throw errorFromBody(res.status, parsed);
+  if (!res.ok) {
+    const err = errorFromBody(res.status, parsed);
+    if (err.code === 'reauth_required' && !options.skipReauth && interceptors.onReauthRequired) {
+      const ok = await interceptors.onReauthRequired();
+      if (ok) return request<T>(method, path, { ...options, skipReauth: true });
+    }
+    if (err.code === 'unauthenticated' && !path.startsWith('/api/auth/')) interceptors.onUnauthenticated?.();
+    throw err;
+  }
   return parsed as T;
 }
 
