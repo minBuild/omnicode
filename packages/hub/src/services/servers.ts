@@ -37,6 +37,7 @@ import {
   type ToolUpsertDiff,
 } from '../contracts.js';
 import type { DownstreamServer } from '../downstream/server.js';
+import { idFromEntryName, isEnvPlaceholder, parseMcpServersJson, type McpJsonEntry, type McpJsonHttpEntry } from './mcpJson.js';
 import { agentsFromBindings, serverDetail, serverSummary } from './dto.js';
 import type { SyncService } from './sync.js';
 import type { UpstreamPool } from './upstreamPool.js';
@@ -252,6 +253,32 @@ export function createServersService(deps: ServersServiceDeps): ServersService {
     return u.toString();
   }
 
+  /** 붙여 넣은 JSON 에서 추가할 http 항목 하나를 고른다 (C2). 여러 개면 화면이 고르도록 목록을 돌려준다 */
+  function pickJsonEntry(json: string, entryName: string | undefined): McpJsonHttpEntry {
+    const entries = parseMcpServersJson(json);
+    const list = entries.map((e) => (e.kind === 'http' ? { name: e.name, kind: e.kind, url: e.url } : { name: e.name, kind: e.kind, command: e.command }));
+    let entry: McpJsonEntry | undefined;
+    if (entryName !== undefined) {
+      entry = entries.find((e) => e.name === entryName);
+      if (!entry) throw new ApiError('validation_error', `'${entryName}' 항목이 없습니다.`, { entries: list });
+    } else if (entries.length === 1) {
+      entry = entries[0];
+    } else {
+      throw new ApiError('validation_error', '서버가 여러 개입니다. 추가할 항목을 고르세요.', { entries: list });
+    }
+    if (!entry) throw new ApiError('validation_error', 'MCP 서버 항목을 찾지 못했습니다.');
+    if (entry.kind === 'stdio') {
+      throw new ApiError('unsupported_transport', 'stdio 서버는 실행 샌드박스(Phase 2)가 준비될 때까지 추가할 수 없습니다. 원격(URL) 서버만 추가할 수 있습니다.', {
+        name: entry.name,
+        command: entry.command,
+      });
+    }
+    if (Object.keys(entry.headers).length > 1) {
+      throw new ApiError('validation_error', '헤더는 인증 헤더 하나만 지원합니다.', { headers: Object.keys(entry.headers) });
+    }
+    return entry;
+  }
+
   return {
     list(): ServerSummary[] {
       return deps.registry.servers.list().map((rec) => serverSummary(rec, deps.registry.tools.listByServer(rec.id), deps.registry.bindings.listByServer(rec.id)));
@@ -265,6 +292,7 @@ export function createServersService(deps: ServersServiceDeps): ServersService {
       let url: string;
       let displayName = input.displayName;
       let preset: Preset | undefined;
+      let jsonEntry: McpJsonHttpEntry | undefined;
       if (input.source === 'preset') {
         preset = deps.presets().find((p) => p.id === input.presetId);
         if (!preset) throw new ApiError('not_found', `프리셋 ${input.presetId}을 찾을 수 없습니다`);
@@ -273,28 +301,35 @@ export function createServersService(deps: ServersServiceDeps): ServersService {
       } else if (input.source === 'url') {
         url = input.url as string;
       } else {
-        throw new ApiError('validation_error', 'JSON 붙여넣기는 Phase 2에서 지원합니다');
+        jsonEntry = pickJsonEntry(input.json as string, input.entry);
+        url = jsonEntry.url;
+        displayName ??= jsonEntry.name;
       }
       url = await validateUrl(url);
       const taken = (cand: string) => !!deps.registry.servers.get(cand);
-      const id = input.id ?? (preset && !taken(preset.id) ? preset.id : deriveServerId(url, taken));
+      const fromEntry = jsonEntry ? idFromEntryName(jsonEntry.name) : '';
+      const id =
+        input.id ??
+        (preset && !taken(preset.id) ? preset.id : fromEntry && SERVER_ID_RE.test(fromEntry) && !taken(fromEntry) ? fromEntry : deriveServerId(url, taken));
       if (!SERVER_ID_RE.test(id)) throw new ApiError('validation_error', 'id 형식이 올바르지 않습니다');
       if (taken(id)) throw new ApiError('conflict', `id '${id}'가 이미 있습니다`);
-      const authType = preset?.auth.type === 'header' ? 'header' : preset?.auth.type === 'oauth' ? 'oauth' : 'none';
+      // JSON 의 헤더 하나는 header 인증으로 본다. 값이 ${VAR} 같은 자리표시자면 키를 따로 입력받는다
+      const jsonHeader = jsonEntry ? Object.entries(jsonEntry.headers)[0] : undefined;
+      const authType = preset?.auth.type === 'header' || jsonHeader ? 'header' : preset?.auth.type === 'oauth' ? 'oauth' : 'none';
       const ts = nowIso();
       deps.registry.servers.insert({
         id,
         display_name: displayName ?? new URL(url).hostname,
         source: input.source,
         preset_id: preset?.id ?? null,
-        transport: preset?.transport ?? 'streamable_http',
+        transport: preset?.transport ?? jsonEntry?.transportHint ?? 'streamable_http',
         url,
         canonical_url: null,
         command: null,
         args_json: null,
         env_keys_json: null,
         auth_type: authType,
-        header_name: preset?.auth.headerName ?? null,
+        header_name: preset?.auth.headerName ?? jsonHeader?.[0] ?? null,
         secret_ref: authType === 'none' ? null : secretRefFor(deps.config.secretsPrefix, id),
         oauth_issuer: null,
         oauth_client_mode: null,
@@ -315,8 +350,20 @@ export function createServersService(deps: ServersServiceDeps): ServersService {
         updated_at: ts,
       });
       for (const agent of preset?.defaultAgents ?? AGENTS) deps.registry.bindings.upsert(id, agent, true);
-      deps.registry.events.add({ kind: 'server.created', server_id: id, actor: 'user', details: { source: input.source, url, presetId: preset?.id ?? null } });
-      if (authType === 'header') {
+      deps.registry.events.add({
+        kind: 'server.created',
+        server_id: id,
+        actor: 'user',
+        details: { source: input.source, url, presetId: preset?.id ?? null, ...(jsonEntry ? { entry: jsonEntry.name, headerName: jsonHeader?.[0] ?? null } : {}) },
+      });
+      if (jsonHeader && !isEnvPlaceholder(jsonHeader[1])) {
+        // 붙여 넣은 키는 시크릿에만 둔다 (16.6). 그 뒤 탐지
+        const ref = secretRefFor(deps.config.secretsPrefix, id);
+        await deps.secrets.put(ref, { type: 'header', header_name: jsonHeader[0], value: jsonHeader[1] });
+        deps.masker.add(jsonHeader[1]);
+        deps.registry.events.add({ kind: 'credentials.saved', server_id: id, actor: 'user', details: { headerName: jsonHeader[0] } });
+        await probeAndAdvance(id).catch((e) => deps.logger.info({ serverId: id, err: String(e) }, 'initial probe did not complete'));
+      } else if (authType === 'header') {
         // 키를 받기 전에는 탐지해도 401 이 뻔하다. 바로 needs_auth 로 둔다 (S2)
         deps.registry.servers.setStatus(id, 'needs_auth', { lastError: null });
       } else {

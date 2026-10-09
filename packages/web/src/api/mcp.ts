@@ -23,6 +23,8 @@ export interface CreateServerInput {
   url?: string;
   presetId?: string;
   json?: string;
+  /** json 에 서버가 여러 개일 때 고른 항목 이름 */
+  entry?: string;
   id?: string;
   displayName?: string;
 }

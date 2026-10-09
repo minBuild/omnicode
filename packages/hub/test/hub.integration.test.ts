@@ -193,4 +193,37 @@ describe('hub integration (legacy upstream)', () => {
     await transport.terminateSession();
     await hub.servers.delete('keep-alive');
   });
+
+  it('adds a server from pasted JSON: picks an entry, stores the header only as a secret, refuses stdio (C2)', async () => {
+    const json = JSON.stringify({
+      mcpServers: {
+        'My Remote': { type: 'http', url: fixture.url, headers: { 'X-Api-Key': 'pasted-key-0123456789' } },
+        local: { command: 'npx', args: ['-y', 'some-server'] },
+      },
+    });
+    await expect(hub.servers.create({ source: 'json', json })).rejects.toMatchObject({ code: 'validation_error', details: { entries: [{ name: 'My Remote' }, { name: 'local' }] } });
+    await expect(hub.servers.create({ source: 'json', json, entry: 'local' })).rejects.toMatchObject({ code: 'unsupported_transport' });
+
+    const before = fixture.requests.length;
+    const created = await hub.servers.create({ source: 'json', json, entry: 'My Remote' });
+    expect(created).toMatchObject({ id: 'my-remote', displayName: 'My Remote', status: 'pending_approval', authType: 'header' });
+    expect(created.auth.headerName).toBe('X-Api-Key');
+    const secret = await secrets.get<{ type: string; value: string }>('omnicode/mcp/my-remote');
+    expect(secret).toMatchObject({ type: 'header', value: 'pasted-key-0123456789' });
+    // 업스트림 요청에 실렸고, 이벤트·상세 응답에는 없다
+    expect(fixture.requests.slice(before).some((r) => r.headers['x-api-key'] === 'pasted-key-0123456789')).toBe(true);
+    expect(JSON.stringify(hub.events({ limit: 50 }))).not.toContain('pasted-key-0123456789');
+    expect(JSON.stringify(created)).not.toContain('pasted-key-0123456789');
+    expect(masker.mask('x pasted-key-0123456789 y')).toBe('x *** y');
+    await hub.servers.delete('my-remote');
+  });
+
+  it('pasted JSON with a ${VAR} placeholder waits for the key instead of probing (C2)', async () => {
+    const json = JSON.stringify({ mcpServers: { needkey: { url: fixture.url, headers: { Authorization: 'Bearer ${MY_TOKEN}' } } } });
+    const created = await hub.servers.create({ source: 'json', json });
+    expect(created).toMatchObject({ id: 'needkey', status: 'needs_auth', authType: 'header' });
+    expect(created.auth.headerName).toBe('Authorization');
+    expect(await secrets.get('omnicode/mcp/needkey')).toBeUndefined();
+    await hub.servers.delete('needkey');
+  });
 });

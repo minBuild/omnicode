@@ -45,6 +45,8 @@ export function AddServerPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<unknown>(undefined);
   const [loadingServer, setLoadingServer] = useState(false);
+  // 입력 단계는 요청 중에 내려갔다가 실패하면 다시 올라온다. 입력값이 지워지지 않게 여기서 들고 있는다
+  const [draft, setDraft] = useState<InputDraft>(EMPTY_DRAFT);
 
   // ?server=<id> — OAuth 리다이렉트 뒤나 목록에서 이어서 하기
   useEffect(() => {
@@ -119,6 +121,8 @@ export function AddServerPage() {
           onTab={setTab}
           pending={create.pending}
           error={create.error}
+          draft={draft}
+          onDraft={(patch) => setDraft((d) => ({ ...d, ...patch }))}
           onCreate={(input, p) => void create.run(input, p)}
         />
       )}
@@ -165,24 +169,62 @@ export function AddServerPage() {
   );
 }
 
+interface InputDraft {
+  url: string;
+  id: string;
+  displayName: string;
+  json: string;
+  picked: string;
+}
+const EMPTY_DRAFT: InputDraft = { url: '', id: '', displayName: '', json: '', picked: '' };
+
 function InputStep({
   tab,
   onTab,
   pending,
   error,
+  draft,
+  onDraft,
   onCreate,
 }: {
   tab: string;
   onTab: (k: string) => void;
   pending: boolean;
   error: unknown;
+  draft: InputDraft;
+  onDraft: (patch: Partial<InputDraft>) => void;
   onCreate: (input: CreateServerInput, preset: PresetView | null) => void;
 }) {
-  const [url, setUrl] = useState('');
-  const [id, setId] = useState('');
-  const [displayName, setDisplayName] = useState('');
+  const { url, id, displayName, json, picked } = draft;
+  const setUrl = (v: string) => onDraft({ url: v });
+  const setId = (v: string) => onDraft({ id: v });
+  const setDisplayName = (v: string) => onDraft({ displayName: v });
+  const setJson = (v: string) => onDraft({ json: v, picked: '' });
+  const setPicked = (v: string) => onDraft({ picked: v });
   const [formError, setFormError] = useState<string | null>(null);
   const presets = useResource((signal) => mcpApi.presets(signal), []);
+  // JSON 에 서버가 여러 개면 API 가 validation_error + details.entries 로 목록을 돌려준다 (C2)
+  const jsonEntries = jsonEntriesOf(error);
+
+  function submitJson(e: FormEvent, entry?: string) {
+    e.preventDefault();
+    if (!json.trim()) return;
+    if (id && !isValidServerId(id)) {
+      setFormError(t.idHelp);
+      return;
+    }
+    setFormError(null);
+    onCreate(
+      {
+        source: 'json',
+        json,
+        ...(entry ? { entry } : {}),
+        ...(id ? { id } : {}),
+        ...(displayName.trim() ? { displayName: displayName.trim() } : {}),
+      },
+      null,
+    );
+  }
 
   function submitUrl(e: FormEvent) {
     e.preventDefault();
@@ -208,14 +250,12 @@ function InputStep({
         items={[
           { key: 'url', label: t.tabs.url },
           { key: 'preset', label: t.tabs.preset },
-          { key: 'json', label: t.tabs.json, disabled: true, note: t.jsonPhase },
+          { key: 'json', label: t.tabs.json },
           { key: 'search', label: t.tabs.search, disabled: true, note: t.searchPhase },
         ]}
       />
-      <p className="small muted">
-        {t.jsonPhase} {t.searchPhase}
-      </p>
-      <ErrorNotice error={error} />
+      <p className="small muted">{t.searchPhase}</p>
+      {!jsonEntries && <ErrorNotice error={error} />}
 
       {tab === 'url' && (
         <form className="card" onSubmit={submitUrl} aria-label={t.tabs.url}>
@@ -238,6 +278,55 @@ function InputStep({
               {pending ? t.probing : t.submitUrl}
             </button>
           </ButtonRow>
+        </form>
+      )}
+
+      {tab === 'json' && (
+        <form className="card" onSubmit={(e) => submitJson(e)} aria-label={t.tabs.json}>
+          <Field label={t.jsonLabel} hint={t.jsonHelp} htmlFor="add-json">
+            <textarea
+              id="add-json"
+              className="mono"
+              rows={10}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder={t.jsonPlaceholder}
+              value={json}
+              onChange={(e) => setJson(e.target.value)}
+            />
+          </Field>
+          <Field label={t.idLabel} hint={t.idHelp} htmlFor="add-json-id">
+            <input id="add-json-id" type="text" autoComplete="off" pattern="[a-z0-9-]{1,40}" value={id} onChange={(e) => setId(e.target.value)} />
+          </Field>
+          {formError && (
+            <p className="danger-text small" role="alert">
+              {formError}
+            </p>
+          )}
+          {jsonEntries ? (
+            <fieldset className="checks">
+              <legend>{t.jsonPickTitle}</legend>
+              {jsonEntries.map((en) => (
+                <label key={en.name} className="check">
+                  <input type="radio" name="json-entry" value={en.name} disabled={en.kind !== 'http'} checked={picked === en.name} onChange={() => setPicked(en.name)} />
+                  <span>
+                    <strong>{en.name}</strong> <span className="mono small muted">{en.kind === 'http' ? en.url : t.jsonPickStdio}</span>
+                  </span>
+                </label>
+              ))}
+              <ButtonRow>
+                <button type="button" className="btn btn-primary" disabled={pending || !picked} onClick={(e) => submitJson(e, picked)}>
+                  {pending ? t.probing : t.jsonAddPicked}
+                </button>
+              </ButtonRow>
+            </fieldset>
+          ) : (
+            <ButtonRow>
+              <button type="submit" className="btn btn-primary" disabled={pending || !json.trim()}>
+                {pending ? t.probing : t.submitJson}
+              </button>
+            </ButtonRow>
+          )}
         </form>
       )}
 
@@ -572,4 +661,25 @@ function DoneStep({ server, result }: { server: ServerDetail; result: ApproveRes
       </ButtonRow>
     </Section>
   );
+}
+
+interface JsonEntryChoice {
+  name: string;
+  kind: 'http' | 'stdio';
+  url?: string;
+}
+
+/** validation_error 의 details.entries (여러 서버가 있는 JSON) */
+function jsonEntriesOf(error: unknown): JsonEntryChoice[] | null {
+  if (!isApiClientError(error) || error.code !== 'validation_error') return null;
+  const entries = error.details?.['entries'];
+  if (!Array.isArray(entries)) return null;
+  const out: JsonEntryChoice[] = [];
+  for (const e of entries) {
+    if (typeof e !== 'object' || e === null) continue;
+    const { name, kind, url } = e as { name?: unknown; kind?: unknown; url?: unknown };
+    if (typeof name !== 'string' || (kind !== 'http' && kind !== 'stdio')) continue;
+    out.push({ name, kind, ...(typeof url === 'string' ? { url } : {}) });
+  }
+  return out.length > 0 ? out : null;
 }

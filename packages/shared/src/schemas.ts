@@ -30,6 +30,8 @@ export const CreateServerBodySchema = z
     url: z.string().max(2048).optional(),
     presetId: z.string().max(80).optional(),
     json: z.string().max(64 * 1024).optional(),
+    /** json 에 서버가 여러 개일 때 추가할 항목 이름 (C2) */
+    entry: z.string().min(1).max(100).optional(),
     id: ServerIdSchema.optional(),
     displayName: z.string().min(1).max(80).optional(),
   })
