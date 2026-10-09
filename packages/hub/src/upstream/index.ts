@@ -8,6 +8,7 @@ import type { ProtocolEra, ToolDefinition } from '@omnicode/shared';
 import {
   UpstreamError,
   type CallContext,
+  type CallToolParams,
   type CreateUpstreamConnector,
   type ProbeResult,
   type UpstreamConnector,
@@ -29,6 +30,7 @@ export {
   type LegacyTransportKind,
 } from './legacy.js';
 export {
+  LISTEN_NOTIFICATIONS,
   LISTEN_SUBSCRIPTIONS,
   MAX_INPUT_REQUIRED_RETRIES,
   META_CLIENT_CAPABILITIES,
@@ -69,6 +71,7 @@ class DetectingConnector implements UpstreamConnector {
   private closed = false;
   private readonly listChangedCbs = new Set<(kind: ListKind) => void>();
   private readonly closeCbs = new Set<(reason?: string) => void>();
+  private readonly resourceUpdatedCbs = new Set<(uri: string) => void>();
 
   constructor(opts: UpstreamConnectorOptions) {
     this.opts = opts;
@@ -136,8 +139,10 @@ class DetectingConnector implements UpstreamConnector {
     this.connector = inner;
     for (const cb of this.listChangedCbs) inner.onListChanged(cb);
     for (const cb of this.closeCbs) inner.onClose(cb);
+    for (const cb of this.resourceUpdatedCbs) inner.onResourceUpdated(cb);
     this.listChangedCbs.clear();
     this.closeCbs.clear();
+    this.resourceUpdatedCbs.clear();
   }
 
   private async inner(): Promise<UpstreamConnector> {
@@ -151,11 +156,24 @@ class DetectingConnector implements UpstreamConnector {
     return (await this.inner()).listTools(signal);
   }
 
-  async callTool(
-    params: { name: string; arguments?: Record<string, unknown>; _meta?: Record<string, unknown> },
-    ctx: CallContext,
-  ): Promise<Record<string, unknown>> {
+  async callTool(params: CallToolParams, ctx: CallContext): Promise<Record<string, unknown>> {
     return (await this.inner()).callTool(params, ctx);
+  }
+
+  async subscribeResource(uri: string): Promise<void> {
+    return (await this.inner()).subscribeResource(uri);
+  }
+
+  async unsubscribeResource(uri: string): Promise<void> {
+    if (this.connector) await this.connector.unsubscribeResource(uri);
+  }
+
+  onResourceUpdated(cb: (uri: string) => void): () => void {
+    if (this.connector) return this.connector.onResourceUpdated(cb);
+    this.resourceUpdatedCbs.add(cb);
+    return () => {
+      this.resourceUpdatedCbs.delete(cb);
+    };
   }
 
   async forward(method: string, params: Record<string, unknown> | undefined, ctx: CallContext): Promise<Record<string, unknown>> {

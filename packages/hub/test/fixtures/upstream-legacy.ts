@@ -7,7 +7,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { ListRootsResultSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
+import { SubscribeRequestSchema, UnsubscribeRequestSchema, ListRootsResultSchema, ListToolsRequestSchema, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 export interface RecordedRequest {
@@ -22,6 +22,8 @@ export interface RecordedRequest {
 export interface LegacyFixtureOptions {
   /** 요청 스트림에 로그를 보내는 'log' 도구와 logging capability 를 더한다 (D1 테스트) */
   withLogTool?: boolean;
+  /** resources.subscribe 와 구독 가능한 리소스 file:///config.json (C3 테스트) */
+  withSubscriptions?: boolean;
   /** tools/list 페이지 크기 (없으면 한 페이지) */
   pageSize?: number;
   /** SSE 대신 JSON 응답 (progress 알림은 실리지 않는다) */
@@ -39,6 +41,12 @@ export interface LegacyFixture {
   emitListChanged(kind: 'tools' | 'prompts' | 'resources'): Promise<void>;
   /** 요청과 무관한 세션 스트림 로그 (withLogTool 일 때만) */
   emitSessionLog(level: 'info' | 'error', data: unknown): Promise<void>;
+  /** 그 uri 를 구독한 세션에 notifications/resources/updated (withSubscriptions) */
+  emitResourceUpdated(uri: string): Promise<void>;
+  /** 세션별 구독 URI */
+  subscriptions(): string[][];
+  readonly subscribeCalls: number;
+  readonly unsubscribeCalls: number;
   /** 모든 세션을 버린다 → 옛 세션 ID로 오는 요청은 404 */
   dropSessions(): Promise<void>;
   sessionIds(): string[];
@@ -66,19 +74,46 @@ export const LEGACY_TOOL_DEFS: Tool[] = [
 
 export interface LegacyToolState {
   cancelledCalls: number;
+  subscribeCalls?: number;
+  unsubscribeCalls?: number;
 }
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 /** 도구 3개를 가진 McpServer. upstream-legacy-sse 픽스처도 같이 쓴다. */
-export function buildLegacyMcpServer(state: LegacyToolState, opts: { pageSize?: number; serverName?: string; withLogTool?: boolean } = {}): McpServer {
+export function buildLegacyMcpServer(
+  state: LegacyToolState,
+  opts: { pageSize?: number; serverName?: string; withLogTool?: boolean; withSubscriptions?: boolean } = {},
+): McpServer {
   const mcp = new McpServer(
     { name: opts.serverName ?? 'legacy-fixture', version: '1.0.0' },
     {
-      capabilities: { prompts: { listChanged: true }, resources: { listChanged: true }, ...(opts.withLogTool ? { logging: {} } : {}) },
+      capabilities: {
+        prompts: { listChanged: true },
+        resources: { listChanged: true, ...(opts.withSubscriptions ? { subscribe: true } : {}) },
+        ...(opts.withLogTool ? { logging: {} } : {}),
+      },
       instructions: 'legacy fixture',
     },
   );
+  if (opts.withSubscriptions) {
+    // 구독 가능한 리소스 하나 (C3). 구독 상태는 세션(mcp 인스턴스)마다 따로 둔다
+    mcp.registerResource('config', 'file:///config.json', { mimeType: 'application/json' }, async (uri) => ({
+      contents: [{ uri: uri.href, text: '{"v":1}' }],
+    }));
+    const subscribed = new Set<string>();
+    (mcp as unknown as { subscribed: Set<string> }).subscribed = subscribed;
+    mcp.server.setRequestHandler(SubscribeRequestSchema, async (req) => {
+      subscribed.add(req.params.uri);
+      state.subscribeCalls = (state.subscribeCalls ?? 0) + 1;
+      return {};
+    });
+    mcp.server.setRequestHandler(UnsubscribeRequestSchema, async (req) => {
+      subscribed.delete(req.params.uri);
+      state.unsubscribeCalls = (state.unsubscribeCalls ?? 0) + 1;
+      return {};
+    });
+  }
   if (opts.withLogTool) {
     // 요청 스트림에 notifications/message 를 보낸다 (D1). gapMs 로 동시 호출이 섞이게 할 수 있다
     mcp.registerTool(
@@ -277,6 +312,19 @@ export async function startLegacyFixture(opts: LegacyFixtureOptions = {}): Promi
     },
     async emitSessionLog(level, data) {
       for (const s of sessions.values()) await s.mcp.server.sendLoggingMessage({ level, logger: 'session', data });
+    },
+    async emitResourceUpdated(uri) {
+      for (const s of sessions.values()) {
+        const subs = (s.mcp as unknown as { subscribed?: Set<string> }).subscribed;
+        if (subs?.has(uri)) await s.mcp.server.sendResourceUpdated({ uri });
+      }
+    },
+    subscriptions: () => [...sessions.values()].map((s) => [...((s.mcp as unknown as { subscribed?: Set<string> }).subscribed ?? [])]),
+    get subscribeCalls() {
+      return state.subscribeCalls ?? 0;
+    },
+    get unsubscribeCalls() {
+      return state.unsubscribeCalls ?? 0;
     },
     async dropSessions() {
       const all = [...sessions.values()];

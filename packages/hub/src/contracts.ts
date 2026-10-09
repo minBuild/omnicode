@@ -434,6 +434,15 @@ export interface UpstreamConnector {
   forward(method: string, params: Record<string, unknown> | undefined, ctx: CallContext): Promise<Record<string, unknown>>;
   /** 업스트림이 보낸 목록 변경 알림 */
   onListChanged(cb: (kind: 'tools' | 'prompts' | 'resources') => void): () => void;
+  /**
+   * 리소스 구독 (C3). 업스트림 capabilities.resources.subscribe 가 true 일 때만 부른다.
+   * legacy 는 resources/subscribe, modern 은 resourceSubscriptions 를 담은 subscriptions/listen 스트림.
+   * 커넥터는 구독 목록을 기억해 세션이 다시 열리면 다시 구독한다.
+   */
+  subscribeResource(uri: string): Promise<void>;
+  unsubscribeResource(uri: string): Promise<void>;
+  /** 구독한 리소스의 notifications/resources/updated */
+  onResourceUpdated(cb: (uri: string) => void): () => void;
   onClose(cb: (reason?: string) => void): () => void;
   close(): Promise<void>;
 }

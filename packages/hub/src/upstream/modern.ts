@@ -52,8 +52,13 @@ export const META_CLIENT_INFO = 'io.modelcontextprotocol/clientInfo';
 export const META_CLIENT_CAPABILITIES = 'io.modelcontextprotocol/clientCapabilities';
 /** 2026-07-28: 서버는 이 값이 있는 요청에만 notifications/message 를 보낸다 (D1) */
 export const META_LOG_LEVEL = 'io.modelcontextprotocol/logLevel';
-/** `subscriptions/listen`에서 구독하는 종류 (11.2) */
-export const LISTEN_SUBSCRIPTIONS = ['toolsListChanged', 'promptsListChanged', 'resourcesListChanged'] as const;
+/**
+ * 목록 변경 스트림의 `subscriptions/listen` 필터 (11.2). 스펙 2026-07-28 basic/patterns/subscriptions:
+ * params.notifications = { toolsListChanged, promptsListChanged, resourcesListChanged, resourceSubscriptions[] }
+ */
+export const LISTEN_NOTIFICATIONS = { toolsListChanged: true, promptsListChanged: true, resourcesListChanged: true } as const;
+/** @deprecated 예전 추정 형식의 이름. LISTEN_NOTIFICATIONS 를 쓴다 */
+export const LISTEN_SUBSCRIPTIONS = Object.keys(LISTEN_NOTIFICATIONS) as Array<keyof typeof LISTEN_NOTIFICATIONS>;
 /** 11.4: inputRequests 없는 input_required의 자동 재시도 상한 */
 export const MAX_INPUT_REQUIRED_RETRIES = 3;
 const MAX_LIST_PAGES = 100;
@@ -335,6 +340,10 @@ export class ModernConnector implements UpstreamConnector {
   private readonly listChangedCbs = new Set<(kind: ListKind) => void>();
   private readonly closeCbs = new Set<(reason?: string) => void>();
   private listen: { ac: AbortController; done: Promise<void> } | undefined;
+  /** 리소스 구독 스트림 (C3). 구독 URI 집합이 바뀌면 새 필터로 다시 연다 (필터는 스트림을 열 때 정해진다) */
+  private resourceListen: { ac: AbortController; done: Promise<void> } | undefined;
+  private readonly resourceUris = new Set<string>();
+  private readonly resourceUpdatedCbs = new Set<(uri: string) => void>();
 
   constructor(opts: UpstreamConnectorOptions, internal: ModernInternalOptions = {}) {
     this.opts = opts;
@@ -510,6 +519,7 @@ export class ModernConnector implements UpstreamConnector {
       listen.ac.abort();
       await listen.done;
     }
+    await this.stopResourceListen();
     for (const cb of this.closeCbs) {
       try {
         cb('closed');
@@ -674,10 +684,68 @@ export class ModernConnector implements UpstreamConnector {
   private startListen(): void {
     if (this.listen || this.closed) return;
     const ac = new AbortController();
-    this.listen = { ac, done: this.listenLoop(ac.signal).catch(() => undefined) };
+    this.listen = {
+      ac,
+      done: this.listenLoop(ac.signal, { notifications: { ...LISTEN_NOTIFICATIONS } }, (n) => {
+        const kind = LIST_CHANGED_METHODS[n.method];
+        if (kind) this.emitListChanged(kind);
+      }).catch(() => undefined),
+    };
   }
 
-  private async listenLoop(signal: AbortSignal): Promise<void> {
+  // -- 리소스 구독 (C3) ------------------------------------------------------------
+
+  async subscribeResource(uri: string): Promise<void> {
+    await this.ensureConnected();
+    if (this.resourceUris.has(uri)) return;
+    this.resourceUris.add(uri);
+    await this.restartResourceListen();
+  }
+
+  async unsubscribeResource(uri: string): Promise<void> {
+    if (!this.resourceUris.delete(uri)) return;
+    await this.restartResourceListen();
+  }
+
+  onResourceUpdated(cb: (uri: string) => void): () => void {
+    this.resourceUpdatedCbs.add(cb);
+    return () => {
+      this.resourceUpdatedCbs.delete(cb);
+    };
+  }
+
+  private async stopResourceListen(): Promise<void> {
+    const r = this.resourceListen;
+    this.resourceListen = undefined;
+    if (r) {
+      r.ac.abort();
+      await r.done;
+    }
+  }
+
+  private async restartResourceListen(): Promise<void> {
+    await this.stopResourceListen();
+    if (this.closed || this.resourceUris.size === 0) return;
+    const uris = [...this.resourceUris];
+    const ac = new AbortController();
+    this.resourceListen = {
+      ac,
+      done: this.listenLoop(ac.signal, { notifications: { resourceSubscriptions: uris } }, (n) => {
+        if (n.method !== 'notifications/resources/updated' || !isRecord(n.params) || typeof n.params.uri !== 'string') return;
+        const uri = n.params.uri;
+        if (!this.resourceUris.has(uri)) return;
+        for (const cb of this.resourceUpdatedCbs) {
+          try {
+            cb(uri);
+          } catch (e) {
+            this.log?.warn({ serverId: this.serverId, err: describeError(e) }, 'onResourceUpdated callback threw');
+          }
+        }
+      }).catch(() => undefined),
+    };
+  }
+
+  private async listenLoop(signal: AbortSignal, params: Record<string, unknown>, onEvent: (n: JsonRpcNotificationMessage) => void): Promise<void> {
     let delay = this.backoff.initialMs;
     let authRetried = false;
     while (!signal.aborted && !this.closed) {
@@ -691,14 +759,18 @@ export class ModernConnector implements UpstreamConnector {
           protocolVersion: this.protocolVersion,
           id: this.nextId++,
           method: 'subscriptions/listen',
-          params: { subscriptions: [...LISTEN_SUBSCRIPTIONS] },
+          params,
           clientCapabilities: {},
           signal,
           maxBytes: Number.POSITIVE_INFINITY,
           onNotification: (n) => {
             gotEvent = true;
-            const kind = LIST_CHANGED_METHODS[n.method];
-            if (kind) this.emitListChanged(kind);
+            if (n.method === 'notifications/subscriptions/acknowledged') {
+              // 서버가 받아들인 필터. 요청한 종류가 빠졌으면 그 종류는 오지 않는다 (스펙 SHOULD 확인)
+              this.log?.debug({ serverId: this.serverId, acknowledged: isRecord(n.params) ? n.params.notifications : undefined }, 'upstream listen acknowledged');
+              return;
+            }
+            onEvent(n);
           },
         });
         if (outcome.kind === 'http_error') {

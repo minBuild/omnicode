@@ -20,12 +20,16 @@ interface SessionEntry {
   transport: StreamableHTTPServerTransport;
   createdAt: number;
   lastSeen: number;
+  /** 이 세션이 구독한 리소스 URI (C3) */
+  uris: Set<string>;
 }
 
 export interface DownstreamServer {
   start(): Promise<{ port: number }>;
   stop(): Promise<void>;
   notifyListChanged(serverId: string, kind: 'tools' | 'prompts' | 'resources'): Promise<void>;
+  /** 구독한 세션에만 notifications/resources/updated (C3) */
+  notifyResourceUpdated(serverId: string, uri: string): Promise<void>;
   closeSessionsFor(serverId: string): Promise<void>;
   sessionCounts(): { legacy: number; modern: number };
   readonly port: number | null;
@@ -106,6 +110,7 @@ export function createDownstreamServer(deps: DownstreamDeps, opts: DownstreamOpt
       transport: null as unknown as StreamableHTTPServerTransport,
       createdAt: now().getTime(),
       lastSeen: now().getTime(),
+      uris: new Set(),
     };
     entry.transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -116,11 +121,24 @@ export function createDownstreamServer(deps: DownstreamDeps, opts: DownstreamOpt
       },
       onsessionclosed: (sid) => {
         sessions.delete(sid);
+        void releaseSubscriptions(entry);
       },
     });
-    entry.server = createSessionServer(deps, { agent, serverId }, limiter, caps);
+    const subs = {
+      add: async (uri: string) => {
+        if (entry.uris.has(uri)) return;
+        await deps.connectors.subscribe(serverId, uri);
+        entry.uris.add(uri);
+      },
+      remove: async (uri: string) => {
+        if (!entry.uris.delete(uri)) return;
+        await deps.connectors.unsubscribe(serverId, uri);
+      },
+    };
+    entry.server = createSessionServer(deps, { agent, serverId }, limiter, caps, subs);
     entry.transport.onclose = () => {
       if (entry.id) sessions.delete(entry.id);
+      void releaseSubscriptions(entry);
     };
     await entry.server.connect(entry.transport);
     return entry;
@@ -194,8 +212,16 @@ export function createDownstreamServer(deps: DownstreamDeps, opts: DownstreamOpt
     await entry.transport.handleRequest(req, res, parsed);
   }
 
+  /** 세션이 끝나면 그 세션의 구독을 모두 푼다 (참조 수가 0 이 되면 업스트림 구독도 끊긴다) */
+  async function releaseSubscriptions(e: SessionEntry) {
+    const uris = [...e.uris];
+    e.uris.clear();
+    for (const uri of uris) await deps.connectors.unsubscribe(e.serverId, uri).catch(() => undefined);
+  }
+
   async function closeEntry(e: SessionEntry) {
     if (e.id) sessions.delete(e.id);
+    await releaseSubscriptions(e);
     try {
       await e.transport.close();
     } catch {
@@ -251,6 +277,18 @@ export function createDownstreamServer(deps: DownstreamDeps, opts: DownstreamOpt
           else await e.server.sendResourceListChanged();
         } catch (err) {
           deps.logger.debug({ serverId, err: String(err) }, 'list_changed notify failed');
+        }
+      }
+    },
+    async notifyResourceUpdated(serverId, uri) {
+      for (const e of [...sessions.values()]) {
+        if (e.serverId !== serverId || !e.uris.has(uri)) continue;
+        const binding = deps.registry.bindings.get(serverId, e.agent);
+        if (!binding || binding.enabled !== 1) continue;
+        try {
+          await e.server.sendResourceUpdated({ uri });
+        } catch (err) {
+          deps.logger.debug({ serverId, err: String(err) }, 'resources/updated notify failed');
         }
       }
     },

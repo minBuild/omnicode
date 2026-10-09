@@ -81,6 +81,9 @@ export async function createHub(opts: CreateHubOptions): Promise<Hub> {
     onListChanged: (serverId, kind) => {
       void handleListChanged(serverId, kind);
     },
+    onResourceUpdated: (serverId, uri) => {
+      void downstream.notifyResourceUpdated(serverId, uri);
+    },
     logger,
   });
   const hooks = createDownstreamHooks({ registry, oauth, pool, logger });

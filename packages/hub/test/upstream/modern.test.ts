@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
-  LISTEN_SUBSCRIPTIONS,
+  LISTEN_NOTIFICATIONS,
   ModernConnector,
   decodeMcpName,
   encodeMcpName,
@@ -296,7 +296,8 @@ describe('ModernConnector (2026-07-28)', () => {
     c.onListChanged((k) => kinds.push(k));
     await c.connect();
     await waitFor(() => (f as ModernFixture).listenerCount() >= 1, 3_000, 'listen stream');
-    expect(f.listenRequests[0]).toMatchObject({ subscriptions: [...LISTEN_SUBSCRIPTIONS] });
+    // 스펙 2026-07-28 subscriptions 패턴: params.notifications 필터
+    expect(f.listenRequests[0]).toMatchObject({ notifications: { ...LISTEN_NOTIFICATIONS } });
     const listen = f.requests.find((r) => r.rpcMethod === 'subscriptions/listen');
     expect(listen?.headers['mcp-method']).toBe('subscriptions/listen');
 

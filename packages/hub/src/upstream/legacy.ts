@@ -22,6 +22,7 @@ import {
   McpError,
   PromptListChangedNotificationSchema,
   ResourceListChangedNotificationSchema,
+  ResourceUpdatedNotificationSchema,
   ResultSchema,
   ToolListChangedNotificationSchema,
   type Notification,
@@ -279,6 +280,10 @@ export class LegacyConnector implements UpstreamConnector {
   private readonly logScope = new AsyncLocalStorage<RequestRun>();
   /** legacy 에는 ttlMs 가 없다 (17.3) */
   readonly lastToolsTtlMs: number | null = null;
+  /** 구독 중인 리소스 (C3). 세션이 다시 열리면 다시 구독한다 */
+  private readonly resourceUris = new Set<string>();
+  private readonly resourceUpdatedCbs = new Set<(uri: string) => void>();
+  private adoptedOnce = false;
 
   constructor(opts: UpstreamConnectorOptions, internal: LegacyInternalOptions = {}) {
     this.opts = opts;
@@ -354,6 +359,20 @@ export class LegacyConnector implements UpstreamConnector {
     s.client.setNotificationHandler(ToolListChangedNotificationSchema, () => this.emitListChanged('tools'));
     s.client.setNotificationHandler(PromptListChangedNotificationSchema, () => this.emitListChanged('prompts'));
     s.client.setNotificationHandler(ResourceListChangedNotificationSchema, () => this.emitListChanged('resources'));
+    s.client.setNotificationHandler(ResourceUpdatedNotificationSchema, (n) => {
+      const uri = n.params.uri;
+      if (!this.resourceUris.has(uri)) return;
+      for (const cb of this.resourceUpdatedCbs) {
+        try {
+          cb(uri);
+        } catch (e) {
+          this.log?.warn({ serverId: this.serverId, err: describeError(e) }, 'onResourceUpdated callback threw');
+        }
+      }
+    });
+    // 새 세션(재초기화)에는 구독이 없다. 기억한 구독을 다시 보낸다
+    if (this.adoptedOnce && this.resourceUris.size > 0) void this.resubscribeAll(s);
+    this.adoptedOnce = true;
     s.client.setNotificationHandler(LoggingMessageNotificationSchema, (n) => {
       const run = this.logScope.getStore();
       const p = n.params as { level?: unknown; logger?: unknown; data?: unknown };
@@ -434,6 +453,51 @@ export class LegacyConnector implements UpstreamConnector {
       return await this.retryOnce(['unavailable'], () => this.request({ method, params }, run, true));
     } finally {
       run.clock.dispose();
+    }
+  }
+
+  // -- 리소스 구독 (C3) ------------------------------------------------------------
+
+  async subscribeResource(uri: string): Promise<void> {
+    if (this.resourceUris.has(uri)) return;
+    this.resourceUris.add(uri);
+    const clock = createRequestClock({ totalMs: this.timeouts.listMs });
+    try {
+      await this.request({ method: 'resources/subscribe', params: { uri } }, { clock, idleMs: this.timeouts.listMs }, true);
+    } catch (e) {
+      this.resourceUris.delete(uri);
+      throw e;
+    } finally {
+      clock.dispose();
+    }
+  }
+
+  async unsubscribeResource(uri: string): Promise<void> {
+    if (!this.resourceUris.delete(uri) || !this.session || this.closed) return;
+    const clock = createRequestClock({ totalMs: this.timeouts.listMs });
+    try {
+      await this.request({ method: 'resources/unsubscribe', params: { uri } }, { clock, idleMs: this.timeouts.listMs }, true);
+    } catch (e) {
+      this.log?.debug({ serverId: this.serverId, err: describeError(e) }, 'upstream resources/unsubscribe failed (ignored)');
+    } finally {
+      clock.dispose();
+    }
+  }
+
+  onResourceUpdated(cb: (uri: string) => void): () => void {
+    this.resourceUpdatedCbs.add(cb);
+    return () => {
+      this.resourceUpdatedCbs.delete(cb);
+    };
+  }
+
+  private async resubscribeAll(s: LegacySession): Promise<void> {
+    for (const uri of [...this.resourceUris]) {
+      try {
+        await s.client.request({ method: 'resources/subscribe', params: { uri } } as Request, ResultSchema, { timeout: this.timeouts.listMs });
+      } catch (e) {
+        this.log?.warn({ serverId: this.serverId, uri, err: describeError(e) }, 'upstream re-subscribe failed');
+      }
     }
   }
 

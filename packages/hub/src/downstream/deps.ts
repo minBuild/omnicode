@@ -11,6 +11,10 @@ export interface ConnectorPool {
   get(serverId: string): Promise<UpstreamConnector>;
   /** 연결돼 있으면 돌려주고 아니면 undefined (초기화 시 capabilities 미러링용, 연결 시도 안 함) */
   peek(serverId: string): UpstreamConnector | undefined;
+  /** 리소스 구독 참조 수 +1. 처음이면 업스트림에 구독한다 (C3). 실패하면 던지고 수를 되돌린다 */
+  subscribe(serverId: string, uri: string): Promise<void>;
+  /** 참조 수 -1. 0 이 되면 업스트림 구독을 끊는다 (실패는 무시) */
+  unsubscribe(serverId: string, uri: string): Promise<void>;
 }
 
 export interface DownstreamHooks {

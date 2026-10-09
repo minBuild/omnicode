@@ -13,6 +13,8 @@ export interface UpstreamPoolDeps {
   createConnector: CreateUpstreamConnector;
   credentials: CredentialProvider;
   onListChanged: (serverId: string, kind: 'tools' | 'prompts' | 'resources') => void;
+  /** 구독한 리소스가 바뀌었을 때 (C3) */
+  onResourceUpdated?: (serverId: string, uri: string) => void;
   logger: Logger;
 }
 
@@ -32,6 +34,8 @@ interface Entry {
 export function createUpstreamPool(deps: UpstreamPoolDeps): UpstreamPool {
   const entries = new Map<string, Entry>();
   const inflight = new Map<string, Promise<UpstreamConnector>>();
+  /** serverId → uri → 구독한 다운스트림 세션 수 (C3) */
+  const subscriptions = new Map<string, Map<string, number>>();
 
   function persistProbe(serverId: string, r: ProbeResult) {
     try {
@@ -66,6 +70,7 @@ export function createUpstreamPool(deps: UpstreamPoolDeps): UpstreamPool {
     persistProbe(rec.id, result);
     const unsubscribe = [
       connector.onListChanged((kind) => deps.onListChanged(rec.id, kind)),
+      connector.onResourceUpdated((uri) => deps.onResourceUpdated?.(rec.id, uri)),
       connector.onClose((reason) => {
         deps.logger.info({ serverId: rec.id, reason }, 'upstream closed');
         const e = entries.get(rec.id);
@@ -73,6 +78,10 @@ export function createUpstreamPool(deps: UpstreamPoolDeps): UpstreamPool {
       }),
     ];
     entries.set(rec.id, { connector, unsubscribe });
+    // 새 커넥터(재탐지·재연결)에는 구독이 없다. 살아 있는 구독을 다시 건다
+    for (const [uri, n] of subscriptions.get(rec.id) ?? []) {
+      if (n > 0) connector.subscribeResource(uri).catch((e: unknown) => deps.logger.warn({ serverId: rec.id, uri, err: String(e) }, 'resource re-subscribe failed'));
+    }
     return connector;
   }
 
@@ -84,7 +93,7 @@ export function createUpstreamPool(deps: UpstreamPoolDeps): UpstreamPool {
     await e.connector.close().catch(() => undefined);
   }
 
-  return {
+  const pool: UpstreamPool = {
     peek: (serverId) => entries.get(serverId)?.connector,
     async get(serverId) {
       const existing = entries.get(serverId);
@@ -107,9 +116,42 @@ export function createUpstreamPool(deps: UpstreamPoolDeps): UpstreamPool {
       return { era: c.era, protocolVersion: c.protocolVersion, transport: c.transport, serverInfo: c.serverInfo, capabilities: c.capabilities };
     },
     evict,
+    async subscribe(serverId, uri) {
+      // 연결을 먼저 얻는다. 새로 연결되면 connect() 가 기존 구독을 다시 거는데, 이 URI 를 아직 세지 않았으므로 두 번 걸지 않는다
+      const c = await pool.get(serverId);
+      let m = subscriptions.get(serverId);
+      if (!m) {
+        m = new Map();
+        subscriptions.set(serverId, m);
+      }
+      const n = (m.get(uri) ?? 0) + 1;
+      m.set(uri, n);
+      if (n > 1) return;
+      try {
+        await c.subscribeResource(uri);
+      } catch (e) {
+        const left = (m.get(uri) ?? 1) - 1;
+        if (left > 0) m.set(uri, left);
+        else m.delete(uri);
+        throw e;
+      }
+    },
+    async unsubscribe(serverId, uri) {
+      const m = subscriptions.get(serverId);
+      const n = m?.get(uri);
+      if (!m || n === undefined) return;
+      if (n > 1) {
+        m.set(uri, n - 1);
+        return;
+      }
+      m.delete(uri);
+      if (m.size === 0) subscriptions.delete(serverId);
+      await entries.get(serverId)?.connector.unsubscribeResource(uri).catch(() => undefined);
+    },
     async closeAll() {
       for (const id of [...entries.keys()]) await evict(id);
     },
     size: () => entries.size,
   };
+  return pool;
 }

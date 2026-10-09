@@ -43,6 +43,10 @@ export interface ModernFixture {
   /** 다음 요청 1개를 이 JSON-RPC 오류로 거절한다 */
   rejectNextWith(rule: RejectRule | null): void;
   emitListChanged(kind: 'tools' | 'prompts' | 'resources'): void;
+  /** resourceSubscriptions 에 uri 가 있는 listen 스트림에만 resources/updated (C3) */
+  emitResourceUpdated(uri: string): void;
+  /** 열린 리소스 구독 스트림들의 URI 목록 */
+  resourceListenerUris(): string[][];
   listenerCount(): number;
   /** 열린 listen 스트림을 서버 쪽에서 끊는다 (응답 없이 종료) */
   dropListeners(): void;
@@ -105,7 +109,8 @@ export async function startModernFixture(opts: ModernFixtureOptions = {}): Promi
   const listenRequests: Array<Record<string, unknown>> = [];
   const inputResponsesSeen: unknown[] = [];
   const logLevelsSeen: unknown[] = [];
-  const listeners = new Set<{ res: ServerResponse; keepalive: ReturnType<typeof setInterval> }>();
+  /** 열린 listen 스트림과 그 필터 (스펙: 요청하지 않은 종류는 보내지 않는다) */
+  const listeners = new Set<{ res: ServerResponse; keepalive: ReturnType<typeof setInterval>; id: unknown; filter: Record<string, unknown> }>();
   let supportedVersions = opts.supportedVersions ?? ['2026-07-28'];
   let unauthorized: { www: string | null; status: number } | null = null;
   let unauthorizedHits = 0;
@@ -344,9 +349,16 @@ export async function startModernFixture(opts: ModernFixtureOptions = {}): Promi
         return;
       case 'subscriptions/listen': {
         listenRequests.push(params);
+        const filter = isRecord(params.notifications) ? params.notifications : {};
         sseStart(res);
+        // 2026-07-28: 첫 메시지는 받아들인 필터를 담은 acknowledged (subscriptionId = 요청 id)
+        sseEvent(res, {
+          jsonrpc: '2.0',
+          method: 'notifications/subscriptions/acknowledged',
+          params: { _meta: { 'io.modelcontextprotocol/subscriptionId': id }, notifications: filter },
+        });
         const keepalive = setInterval(() => res.write(': keepalive\n\n'), keepaliveMs);
-        const entry = { res, keepalive };
+        const entry = { res, keepalive, id, filter };
         listeners.add(entry);
         res.on('close', () => {
           clearInterval(keepalive);
@@ -384,8 +396,20 @@ export async function startModernFixture(opts: ModernFixtureOptions = {}): Promi
       rejectNext = rule;
     },
     emitListChanged(kind) {
-      for (const l of listeners) sseEvent(l.res, { jsonrpc: '2.0', method: `notifications/${kind}/list_changed` });
+      const key = `${kind}ListChanged`;
+      for (const l of listeners) {
+        if (l.filter[key] !== true) continue;
+        sseEvent(l.res, { jsonrpc: '2.0', method: `notifications/${kind}/list_changed`, params: { _meta: { 'io.modelcontextprotocol/subscriptionId': l.id } } });
+      }
     },
+    emitResourceUpdated(uri) {
+      for (const l of listeners) {
+        const subs = l.filter.resourceSubscriptions;
+        if (!Array.isArray(subs) || !subs.includes(uri)) continue;
+        sseEvent(l.res, { jsonrpc: '2.0', method: 'notifications/resources/updated', params: { _meta: { 'io.modelcontextprotocol/subscriptionId': l.id }, uri } });
+      }
+    },
+    resourceListenerUris: () => [...listeners].flatMap((l) => (Array.isArray(l.filter.resourceSubscriptions) ? [l.filter.resourceSubscriptions as string[]] : [])),
     listenerCount: () => listeners.size,
     dropListeners() {
       for (const l of listeners) {

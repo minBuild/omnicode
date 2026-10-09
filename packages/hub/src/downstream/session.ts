@@ -14,6 +14,8 @@ import {
   McpError,
   ReadResourceRequestSchema,
   SetLevelRequestSchema,
+  SubscribeRequestSchema,
+  UnsubscribeRequestSchema,
   type ServerCapabilities,
 } from '@modelcontextprotocol/sdk/types.js';
 import { DEFAULTS, HubError, JOB_ID_RE, LIMITS, sha256Hex, type Agent, type AuditEntry, type ToolRecord } from '@omnicode/shared';
@@ -25,6 +27,12 @@ import { authorizeCall, visibleTools, type PolicyInput } from './policy.js';
 export interface SessionContext {
   agent: Agent;
   serverId: string;
+}
+
+/** 이 세션의 리소스 구독 (C3). server.ts 가 세션별로 만든다 */
+export interface SessionSubscriptions {
+  add(uri: string): Promise<void>;
+  remove(uri: string): Promise<void>;
 }
 
 type HeaderBag = Record<string, string | string[] | undefined>;
@@ -78,7 +86,13 @@ export function fromHub(e: HubError): McpError {
   return new McpError(e.rpc.code, e.rpc.message, e.rpc.data);
 }
 
-export function createSessionServer(deps: DownstreamDeps, ctx: SessionContext, limiter: Limiter, capabilities: ServerCapabilities): Server {
+export function createSessionServer(
+  deps: DownstreamDeps,
+  ctx: SessionContext,
+  limiter: Limiter,
+  capabilities: ServerCapabilities,
+  subs?: SessionSubscriptions,
+): Server {
   const now = deps.now ?? (() => new Date());
   const server = new Server({ name: 'omnicode-hub', version: deps.config.version }, { capabilities });
 
@@ -324,6 +338,34 @@ export function createSessionServer(deps: DownstreamDeps, ctx: SessionContext, l
   if (capabilities.prompts) forwardOne(GetPromptRequestSchema, 'prompts/get', (p) => String(p.name ?? ''));
   if (capabilities.completions) forwardOne(CompleteRequestSchema, 'completion/complete', () => 'completion');
 
+  // resources/subscribe·unsubscribe (C3): 업스트림이 subscribe 를 광고할 때만
+  if (capabilities.resources?.subscribe && subs) {
+    server.setRequestHandler(SubscribeRequestSchema, async (req) => {
+      const input = policyInput();
+      if (!input) throw fromHub(new HubError('server_deleting'));
+      try {
+        authorizeForward(input);
+      } catch (e) {
+        if (e instanceof HubError) throw fromHub(e);
+        throw e;
+      }
+      try {
+        await subs.add(req.params.uri);
+      } catch (e) {
+        if (e instanceof UpstreamError) {
+          await deps.hooks.onUpstreamError(ctx.serverId, e);
+          throw mapUpstreamError(e, label(), DEFAULTS.listTimeoutMs);
+        }
+        throw e;
+      }
+      return {};
+    });
+    server.setRequestHandler(UnsubscribeRequestSchema, async (req) => {
+      await subs.remove(req.params.uri);
+      return {};
+    });
+  }
+
   // logging/setLevel: 업스트림으로 전달하지 않고, 이 세션에 넘길 로그의 최소 수준으로만 쓴다 (11.3, D1)
   server.setRequestHandler(SetLevelRequestSchema, async (req) => {
     if (isLoggingLevel(req.params.level)) sessionLogLevel = req.params.level;
@@ -339,7 +381,10 @@ export function mirrorCapabilities(upstream: Record<string, unknown> | null | un
   const caps: ServerCapabilities = { tools: { listChanged: true }, logging: {} };
   if (!upstream) return { ...caps, prompts: { listChanged: true }, resources: { listChanged: true, subscribe: false } };
   if (upstream.prompts) caps.prompts = { listChanged: true };
-  if (upstream.resources) caps.resources = { listChanged: true, subscribe: false };
+  if (upstream.resources) {
+    const r = upstream.resources as { subscribe?: unknown };
+    caps.resources = { listChanged: true, subscribe: r.subscribe === true };
+  }
   if (upstream.completions) caps.completions = {};
   return caps;
 }

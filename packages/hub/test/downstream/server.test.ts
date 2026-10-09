@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { LoggingMessageNotificationSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
+import { LoggingMessageNotificationSchema, ResourceUpdatedNotificationSchema, ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
 import { createMasker, type Agent, type AuditEntry, type BindingRecord, type ServerRecord, type ToolRecord } from '@omnicode/shared';
 import { UpstreamError, type CallContext, type HubConfig, type Registry, type UpstreamConnector } from '../../src/contracts.js';
 import { createDownstreamServer, type DownstreamServer } from '../../src/downstream/server.js';
@@ -22,11 +22,12 @@ function mkTool(name: string, approved = true): ToolRecord {
   return { server_id: 'fish', name, title: null, description: def.description, definition_json: JSON.stringify(def), schema_hash: 'h1', approved_hash: approved ? 'h1' : null, approved_definition_json: null, approved_at: null, annotations_json: null, enabled: 1, first_seen_at: 't', last_seen_at: 't' };
 }
 
-function fakeConnector(): UpstreamConnector & { calls: Array<{ name: string; ctx: CallContext }>; listChanged: Array<(k: 'tools' | 'prompts' | 'resources') => void> } {
+function fakeConnector(caps: Record<string, unknown> = { tools: {}, prompts: {} }): UpstreamConnector & { calls: Array<{ name: string; ctx: CallContext }>; listChanged: Array<(k: 'tools' | 'prompts' | 'resources') => void> } {
   const calls: Array<{ name: string; ctx: CallContext }> = [];
   const listChanged: Array<(k: 'tools' | 'prompts' | 'resources') => void> = [];
   return {
-    serverId: 'fish', era: 'legacy', protocolVersion: '2025-06-18', transport: 'streamable_http', serverInfo: { name: 'fake', version: '1' }, capabilities: { tools: {}, prompts: {} }, lastToolsTtlMs: null,
+    serverId: 'fish', era: 'legacy', protocolVersion: '2025-06-18', transport: 'streamable_http', serverInfo: { name: 'fake', version: '1' }, capabilities: caps, lastToolsTtlMs: null,
+    subscribeResource: async () => undefined, unsubscribeResource: async () => undefined, onResourceUpdated: () => () => undefined,
     calls, listChanged,
     connect: async () => ({ era: 'legacy', protocolVersion: '2025-06-18', transport: 'streamable_http', serverInfo: null, capabilities: null }),
     listTools: async () => [],
@@ -56,9 +57,9 @@ function fakeConnector(): UpstreamConnector & { calls: Array<{ name: string; ctx
   };
 }
 
-interface World { srv: DownstreamServer; port: number; records: { server: ServerRecord; tools: ToolRecord[]; bindings: BindingRecord[] }; audit: Omit<AuditEntry, 'id'>[]; connector: ReturnType<typeof fakeConnector>; errors: UpstreamError[]; }
+interface World { srv: DownstreamServer; port: number; records: { server: ServerRecord; tools: ToolRecord[]; bindings: BindingRecord[] }; audit: Omit<AuditEntry, 'id'>[]; connector: ReturnType<typeof fakeConnector>; errors: UpstreamError[]; subs: string[]; }
 
-async function world(status: ServerRecord['status'] = 'active', configOver: Partial<HubConfig> = {}): Promise<World> {
+async function world(status: ServerRecord['status'] = 'active', configOver: Partial<HubConfig> = {}, opts: { resources?: boolean } = {}): Promise<World> {
   const records = { server: mkServer(status), tools: [mkTool('echo'), mkTool('slow'), mkTool('boom'), mkTool('auth'), mkTool('log'), mkTool('pending', false)], bindings: [{ server_id: 'fish', agent: 'claude', enabled: 1, sync_status: null, synced_at: null, last_error: null } as BindingRecord] };
   const registry = {
     servers: { get: (id: string) => (id === 'fish' ? records.server : undefined) },
@@ -66,13 +67,19 @@ async function world(status: ServerRecord['status'] = 'active', configOver: Part
     bindings: { get: (_s: string, a: Agent) => records.bindings.find((b) => b.agent === a) },
   } as unknown as Registry;
   const audit: Omit<AuditEntry, 'id'>[] = [];
-  const connector = fakeConnector();
+  const connector = fakeConnector(opts.resources ? { tools: {}, resources: { subscribe: true, listChanged: true } } : undefined);
   const errors: UpstreamError[] = [];
+  const subs: string[] = [];
   const deps: DownstreamDeps = {
     config: { hubHost: '127.0.0.1', hubPort: 0, idleTimeoutMs: 1000, version: 'test', forwardLogMessages: true, ...configOver } as HubConfig,
     registry,
     tokens: { authenticate: (t: string) => (Object.entries(TOKENS).find(([, v]) => v === t)?.[0] as Agent | undefined) ?? null, rotate: async () => ({ rotatedAt: '', graceUntil: '' }) },
-    connectors: { get: async () => connector, peek: () => connector },
+    connectors: {
+      get: async () => connector,
+      peek: () => connector,
+      subscribe: async (id: string, uri: string) => void subs.push(`+${id}:${uri}`),
+      unsubscribe: async (id: string, uri: string) => void subs.push(`-${id}:${uri}`),
+    },
     hooks: { onUpstreamError: async (_id, e) => void errors.push(e), onUpstreamOk: async () => undefined },
     audit: { record: (e) => void audit.push(e) },
     masker: createMasker(['upstream-access-token-123456']),
@@ -80,7 +87,7 @@ async function world(status: ServerRecord['status'] = 'active', configOver: Part
   };
   const srv = createDownstreamServer(deps, { port: 0 });
   const { port } = await srv.start();
-  return { srv, port, records, audit, connector, errors };
+  return { srv, port, records, audit, connector, errors, subs };
 }
 
 async function connect(port: number, token: string, extraHeaders: Record<string, string> = {}) {
@@ -207,4 +214,51 @@ describe('downstream server with log forwarding disabled', () => {
       await w2.srv.stop();
     }
   });
+
+describe('downstream resource subscriptions (C3)', () => {
+  it('subscribes through the pool, forwards updates only to subscribers, and releases on unsubscribe and session end', async () => {
+    const w3 = await world('active', {}, { resources: true });
+    try {
+      const a = await connect(w3.port, TOKENS.claude);
+      const b = await connect(w3.port, TOKENS.claude);
+      expect(a.client.getServerCapabilities()?.resources?.subscribe).toBe(true);
+      const gotA: string[] = [];
+      const gotB: string[] = [];
+      a.client.setNotificationHandler(ResourceUpdatedNotificationSchema, async (n) => void gotA.push(n.params.uri));
+      b.client.setNotificationHandler(ResourceUpdatedNotificationSchema, async (n) => void gotB.push(n.params.uri));
+      await a.client.subscribeResource({ uri: 'file:///a' });
+      expect(w3.subs).toEqual(['+fish:file:///a']);
+      await w3.srv.notifyResourceUpdated('fish', 'file:///a');
+      await w3.srv.notifyResourceUpdated('fish', 'file:///other');
+      await new Promise((r) => setTimeout(r, 100));
+      expect(gotA).toEqual(['file:///a']);
+      expect(gotB).toEqual([]);
+
+      await a.client.unsubscribeResource({ uri: 'file:///a' });
+      expect(w3.subs).toEqual(['+fish:file:///a', '-fish:file:///a']);
+      await b.client.subscribeResource({ uri: 'file:///b' });
+      await b.transport.terminateSession();
+      await new Promise((r) => setTimeout(r, 100));
+      expect(w3.subs).toEqual(['+fish:file:///a', '-fish:file:///a', '+fish:file:///b', '-fish:file:///b']);
+
+      // 바인딩이 꺼진 에이전트는 구독할 수 없다
+      const codex = await connect(w3.port, TOKENS.codex);
+      await expect(codex.client.subscribeResource({ uri: 'file:///a' })).rejects.toMatchObject({ code: -32018 });
+    } finally {
+      await w3.srv.stop();
+    }
+  });
+
+  it('does not advertise subscribe when the upstream does not', async () => {
+    const w4 = await world();
+    try {
+      const { client } = await connect(w4.port, TOKENS.claude);
+      expect(client.getServerCapabilities()?.resources?.subscribe ?? false).toBe(false);
+      await expect(client.subscribeResource({ uri: 'file:///a' })).rejects.toBeDefined();
+      expect(w4.subs).toEqual([]);
+    } finally {
+      await w4.srv.stop();
+    }
+  });
+});
 });
