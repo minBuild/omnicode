@@ -9,3 +9,36 @@ dist/
 .DS_Store
 coverage/
 packages/web/dist/
+
+# --- 로컬 배포 설정 (실제 값) — 절대 커밋하지 않는다 -------------------------
+# 실제 값이 든 파일은 infra/local/ 에 둔다. README 만 커밋한다.
+infra/local/*
+!infra/local/README.md
+# 어디에 두든 이름으로도 막는다
+omnicode.env
+*.local.env
+*.local.json
+*.local.yaml
+*.local.yml
+# AWS 자격증명·키
+.aws/
+*.pem
+*.key
+*.p12
+*.pfx
+aws-credentials*
+credentials.csv
+*_accessKeys.csv
+# 혹시 IaC 를 붙일 때
+*.tfvars
+*.tfvars.json
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+cdk.out/
+cdk.context.json
+samconfig.toml
+# 설치 토큰·DB 사본
+setup-token
+*.sqlite-journal
