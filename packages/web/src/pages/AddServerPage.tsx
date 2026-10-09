@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
-import type { Agent, ApproveResult, PresetView, ServerDetail, SyncOutcome } from '@omnicode/shared';
+import type { Agent, ApproveResult, PresetView, RegistryServerView, RegistrySearchResult, ServerDetail, SyncOutcome } from '@omnicode/shared';
 import { mcpApi, type CreateServerInput } from '../api/mcp';
 import { useAsync, useResource } from '../api/hooks';
 import { isApiClientError } from '../api/client';
@@ -175,8 +175,10 @@ interface InputDraft {
   displayName: string;
   json: string;
   picked: string;
+  query: string;
+  search: RegistrySearchResult | null;
 }
-const EMPTY_DRAFT: InputDraft = { url: '', id: '', displayName: '', json: '', picked: '' };
+const EMPTY_DRAFT: InputDraft = { url: '', id: '', displayName: '', json: '', picked: '', query: '', search: null };
 
 function InputStep({
   tab,
@@ -251,10 +253,9 @@ function InputStep({
           { key: 'url', label: t.tabs.url },
           { key: 'preset', label: t.tabs.preset },
           { key: 'json', label: t.tabs.json },
-          { key: 'search', label: t.tabs.search, disabled: true, note: t.searchPhase },
+          { key: 'search', label: t.tabs.search },
         ]}
       />
-      <p className="small muted">{t.searchPhase}</p>
       {!jsonEntries && <ErrorNotice error={error} />}
 
       {tab === 'url' && (
@@ -280,6 +281,8 @@ function InputStep({
           </ButtonRow>
         </form>
       )}
+
+      {tab === 'search' && <SearchTab pending={pending} draft={draft} onDraft={onDraft} onCreate={onCreate} />}
 
       {tab === 'json' && (
         <form className="card" onSubmit={(e) => submitJson(e)} aria-label={t.tabs.json}>
@@ -682,4 +685,124 @@ function jsonEntriesOf(error: unknown): JsonEntryChoice[] | null {
     out.push({ name, kind, ...(typeof url === 'string' ? { url } : {}) });
   }
   return out.length > 0 ? out : null;
+}
+
+/** 레지스트리 검색 탭 (Phase 3). 원격 서버만 바로 추가할 수 있다 */
+function SearchTab({
+  pending,
+  draft,
+  onDraft,
+  onCreate,
+}: {
+  pending: boolean;
+  draft: InputDraft;
+  onDraft: (patch: Partial<InputDraft>) => void;
+  onCreate: (input: CreateServerInput, preset: PresetView | null) => void;
+}) {
+  const search = useAsync(async (cursor?: string) => {
+    const r = await mcpApi.registrySearch(draft.query.trim(), cursor);
+    onDraft({ search: cursor && draft.search ? { ...r, items: [...draft.search.items, ...r.items] } : r });
+    return r;
+  });
+  const result = draft.search;
+
+  function submit(e: FormEvent) {
+    e.preventDefault();
+    void search.run();
+  }
+
+  return (
+    <div>
+      <form className="card" onSubmit={submit} aria-label={t.tabs.search} role="search">
+        <Field label={t.searchLabel} htmlFor="registry-q">
+          <input
+            id="registry-q"
+            type="search"
+            autoComplete="off"
+            maxLength={100}
+            placeholder={t.searchPlaceholder}
+            value={draft.query}
+            onChange={(e) => onDraft({ query: e.target.value })}
+          />
+        </Field>
+        <ButtonRow>
+          <button type="submit" className="btn btn-primary" disabled={search.pending}>
+            {search.pending ? t.searching : t.searchButton}
+          </button>
+        </ButtonRow>
+      </form>
+      <ErrorNotice error={search.error} />
+      {result && !result.enabled && <Notice tone="info">{t.searchDisabled}</Notice>}
+      {result?.enabled && (
+        <>
+          {result.source && <p className="small muted">{t.searchSource(result.source)}</p>}
+          {result.items.length === 0 && <p className="empty">{t.searchEmpty}</p>}
+          <ul className="card-list">
+            {result.items.map((item) => (
+              <RegistryItem key={`${item.name}@${item.version}`} item={item} pending={pending} onCreate={onCreate} />
+            ))}
+          </ul>
+          {result.nextCursor && (
+            <ButtonRow>
+              <button type="button" className="btn" disabled={search.pending} onClick={() => void search.run(result.nextCursor ?? undefined)}>
+                {t.searchMore}
+              </button>
+            </ButtonRow>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function RegistryItem({
+  item,
+  pending,
+  onCreate,
+}: {
+  item: RegistryServerView;
+  pending: boolean;
+  onCreate: (input: CreateServerInput, preset: PresetView | null) => void;
+}) {
+  return (
+    <li className="card">
+      <h2 className="server-name">
+        {item.title ?? item.name} {item.status === 'deprecated' && <Badge tone="warn">{t.searchDeprecated}</Badge>}
+      </h2>
+      <p className="mono small muted">
+        {item.name} · {item.version}
+      </p>
+      {item.description && <p>{item.description}</p>}
+      {item.stdioOnly && <p className="small muted">{t.searchStdioOnly}</p>}
+      {item.remotes.map((r) => (
+        <div key={`${r.type}:${r.url}`} className="registry-remote">
+          <p className="mono small wrap">
+            {transportLabels[r.type === 'sse' ? 'sse' : 'streamable_http']} · {r.url}
+          </p>
+          {r.headers.length > 0 && <p className="small muted">{t.searchHeaders(r.headers)}</p>}
+          {r.templated ? (
+            <p className="small muted">{t.searchTemplated}</p>
+          ) : (
+            <ButtonRow>
+              <button type="button" className="btn btn-primary" disabled={pending} onClick={() => onCreate({ source: 'registry', url: r.url, displayName: item.title ?? item.name }, null)}>
+                {pending ? t.probing : t.searchAddRemote}
+              </button>
+            </ButtonRow>
+          )}
+        </div>
+      ))}
+      <ButtonRow>
+        {item.websiteUrl && isHttpsUrl(item.websiteUrl) && (
+          <a className="btn btn-ghost" href={item.websiteUrl} target="_blank" rel="noopener noreferrer">
+            {t.searchWebsite}
+          </a>
+        )}
+        {item.repositoryUrl && isHttpsUrl(item.repositoryUrl) && (
+          <a className="btn btn-ghost" href={item.repositoryUrl} target="_blank" rel="noopener noreferrer">
+            {t.searchRepo}
+          </a>
+        )}
+      </ButtonRow>
+    </li>
+  );
 }

@@ -26,7 +26,7 @@ export const BindingsPatchSchema = z.object({
 
 export const CreateServerBodySchema = z
   .object({
-    source: z.enum(['url', 'preset', 'json']),
+    source: z.enum(['url', 'preset', 'json', 'registry']),
     url: z.string().max(2048).optional(),
     presetId: z.string().max(80).optional(),
     json: z.string().max(64 * 1024).optional(),
@@ -35,7 +35,7 @@ export const CreateServerBodySchema = z
     id: ServerIdSchema.optional(),
     displayName: z.string().min(1).max(80).optional(),
   })
-  .refine((b) => b.source !== 'url' || !!b.url, { message: 'url이 필요합니다', path: ['url'] })
+  .refine((b) => (b.source !== 'url' && b.source !== 'registry') || !!b.url, { message: 'url이 필요합니다', path: ['url'] })
   .refine((b) => b.source !== 'preset' || !!b.presetId, { message: 'presetId가 필요합니다', path: ['presetId'] })
   .refine((b) => b.source !== 'json' || !!b.json, { message: 'json이 필요합니다', path: ['json'] });
 export type CreateServerBody = z.infer<typeof CreateServerBodySchema>;
@@ -139,3 +139,9 @@ export const McpServersJsonSchema = z.object({
     }),
   ),
 });
+
+export const RegistrySearchQuerySchema = z.object({
+  q: z.string().trim().max(100).default(''),
+  cursor: z.string().max(500).optional(),
+});
+export type RegistrySearchQuery = z.infer<typeof RegistrySearchQuerySchema>;

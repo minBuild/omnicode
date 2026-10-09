@@ -311,6 +311,7 @@ export function makeConfig(overrides: Partial<HubConfig> = {}): HubConfig {
     healthIntervalMs: DEFAULTS.healthIntervalMs,
     forwardLogMessages: true,
     cimdEnabled: true,
+    registryUrl: null,
     presetsDir: '/tmp/omnicode-test/presets',
     version: '0.1.0-test',
     ...overrides,

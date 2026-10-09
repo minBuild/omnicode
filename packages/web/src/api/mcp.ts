@@ -12,6 +12,7 @@ import type {
   ServerSummary,
   SyncOutcome,
   TestResult,
+  RegistrySearchResult,
 } from '@omnicode/shared';
 import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from './client';
 
@@ -19,7 +20,7 @@ const BASE = '/api/mcp';
 const enc = encodeURIComponent;
 
 export interface CreateServerInput {
-  source: 'url' | 'preset' | 'json';
+  source: 'url' | 'preset' | 'json' | 'registry';
   url?: string;
   presetId?: string;
   json?: string;
@@ -89,4 +90,5 @@ export const mcpApi = {
   hubStatus: (signal?: AbortSignal) => apiGet<HubStatus>(`${BASE}/hub/status`, { signal }),
   rotateTokens: (agents: Agent[]) => apiPost<{ rotatedAt: string; graceUntil: string }>(`${BASE}/hub/tokens/rotate`, { agents }),
   presets: async (signal?: AbortSignal) => asList<PresetView>(await apiGet<unknown>(`${BASE}/presets`, { signal })),
+  registrySearch: (q: string, cursor?: string) => apiGet<RegistrySearchResult>(`${BASE}/registry/search`, { query: { q, cursor } }),
 };

@@ -97,12 +97,14 @@ describe('presets / registry', () => {
     expect(json<Array<{ id: string; url: string }>>(res)[0]).toMatchObject({ id: 'fish-audio', url: 'https://api.fish.audio/mcp' });
   });
 
-  it('GET /api/mcp/registry/search is 501 not_implemented (Phase 3)', async () => {
-    const res = await t.app.inject({ method: 'GET', url: '/api/mcp/registry/search?q=fish', headers: authed });
-    expect(res.statusCode).toBe(501);
-    const body = json<ErrorResponse>(res);
-    expect(body.error.code).toBe('not_implemented');
-    expect(typeof body.error.message).toBe('string');
+  it('GET /api/mcp/registry/search passes q and cursor to the hub catalog', async () => {
+    t.hub.registrySearch = { enabled: true, source: 'registry.example', items: [], nextCursor: 'n2' };
+    const res = await t.app.inject({ method: 'GET', url: '/api/mcp/registry/search?q=fish&cursor=c1', headers: authed });
+    expect(res.statusCode).toBe(200);
+    expect(json(res)).toEqual({ enabled: true, source: 'registry.example', items: [], nextCursor: 'n2' });
+    expect(t.hub.callsTo('catalog.search')[0]?.args).toEqual(['fish', 'c1']);
+    const long = await t.app.inject({ method: 'GET', url: `/api/mcp/registry/search?q=${'x'.repeat(101)}`, headers: authed });
+    expect(long.statusCode).toBe(400);
   });
 
   it('still requires a session for registry search', async () => {

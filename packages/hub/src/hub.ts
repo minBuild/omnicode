@@ -14,6 +14,7 @@ import { createOAuthManager, createRefreshScheduler } from './oauth/index.js';
 import { openRegistry } from './registry/index.js';
 import { createSecretsForConfig } from './secrets/index.js';
 import { createCredentialProvider } from './services/credentials.js';
+import { createCatalog } from './services/catalog.js';
 import { createHealthScheduler } from './services/health.js';
 import { createDownstreamHooks } from './services/hooks.js';
 import { loadPresets } from './services/presets.js';
@@ -130,8 +131,11 @@ export async function createHub(opts: CreateHubOptions): Promise<Hub> {
     }
   }
 
+  const catalog = createCatalog({ config, fetch: guard.fetch, logger });
+
   const hub: Hub = {
     config,
+    catalog,
     registry,
     servers,
     oauth,

@@ -17,6 +17,7 @@ export { createUpstreamPool } from './services/upstreamPool.js';
 export { createCredentialProvider } from './services/credentials.js';
 export { createDownstreamHooks } from './services/hooks.js';
 export { loadPresets } from './services/presets.js';
+export { createCatalog } from './services/catalog.js';
 export { createAgentdClient } from './sync/agentdClient.js';
 export { createHub } from './hub.js';
 export type { CreateHubOptions } from './hub.js';

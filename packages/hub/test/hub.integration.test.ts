@@ -60,6 +60,7 @@ describe('hub integration (legacy upstream)', () => {
       healthIntervalMs: 600_000,
       forwardLogMessages: true,
       cimdEnabled: true,
+      registryUrl: null,
       presetsDir: new URL('../../../presets', import.meta.url).pathname,
       version: 'test',
     };

@@ -29,6 +29,7 @@ export const ENV = {
   healthIntervalMs: 'OMNICODE_HEALTH_INTERVAL_MS',
   forwardLogMessages: 'OMNICODE_MCP_FORWARD_LOG_MESSAGES',
   cimdEnabled: 'OMNICODE_OAUTH_CIMD',
+  registryUrl: 'OMNICODE_MCP_REGISTRY_URL',
   presetsDir: 'OMNICODE_PRESETS_DIR',
 } as const;
 
@@ -113,9 +114,27 @@ const HubConfigSchema = z.object({
   healthIntervalMs: z.number().int().min(5_000).max(24 * 60 * 60 * 1000),
   forwardLogMessages: z.boolean(),
   cimdEnabled: z.boolean(),
+  registryUrl: z.string().nullable(),
   presetsDir: absolutePath('presets dir'),
   version: z.string().min(1),
 });
+
+/** OMNICODE_MCP_REGISTRY_URL: https 만, 끝 슬래시 제거. 비면 null (검색 끔) */
+function normalizeRegistryUrl(raw: string | undefined, problems: string[]): string | null {
+  if (raw === undefined || raw === '') return null;
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    problems.push(`${ENV.registryUrl}: not a URL`);
+    return null;
+  }
+  if (u.protocol !== 'https:' || u.search || u.hash || u.username || u.password) {
+    problems.push(`${ENV.registryUrl}: must be an https URL without query, fragment or credentials`);
+    return null;
+  }
+  return u.toString().replace(/\/+$/, '');
+}
 
 /** OMNICODE_PUBLIC_URL 정규화: https 만 (allowHttpLoopback 이면 루프백 http 허용), 끝 슬래시 제거 */
 function normalizePublicUrl(raw: string | undefined, allowHttpLoopback: boolean, problems: string[]): string | null {
@@ -171,6 +190,7 @@ export function loadHubConfig(env: NodeJS.ProcessEnv = process.env): HubConfig {
     healthIntervalMs: readInt(env, ENV.healthIntervalMs, problems) ?? DEFAULTS.healthIntervalMs,
     forwardLogMessages: readBool(env, ENV.forwardLogMessages, problems) ?? true,
     cimdEnabled: readBool(env, ENV.cimdEnabled, problems) ?? true,
+    registryUrl: normalizeRegistryUrl(readStr(env, ENV.registryUrl), problems),
     presetsDir: readStr(env, ENV.presetsDir) ?? defaultPresetsDir(),
     version: readPackageVersion(),
   };

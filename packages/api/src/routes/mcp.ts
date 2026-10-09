@@ -12,13 +12,14 @@ import {
   CredentialsBodySchema,
   OAuthClientBodySchema,
   PatchServerBodySchema,
+  RegistrySearchQuerySchema,
   RotateTokensBodySchema,
   ServerIdSchema,
   type DeleteResult,
 } from '@omnicode/shared';
 import type { Hub } from '@omnicode/hub';
 import type { AuthHooks } from '../auth.js';
-import { errorBody, validate } from '../errors.js';
+import { validate } from '../errors.js';
 
 export type McpRoutesOptions = { hub: Hub; auth: AuthHooks };
 
@@ -125,7 +126,9 @@ export const mcpRoutes: FastifyPluginAsync<McpRoutesOptions> = async (api, { hub
   // --- 프리셋·레지스트리 ------------------------------------------------------
   api.get('/presets', async () => hub.presets());
 
-  api.get('/registry/search', async (_req, reply) =>
-    reply.code(501).send(errorBody('not_implemented', '레지스트리 검색은 Phase 3에서 제공됩니다.')),
-  );
+  // 레지스트리 검색 (Phase 3): OMNICODE_MCP_REGISTRY_URL 이 없으면 { enabled: false }
+  api.get('/registry/search', async (req) => {
+    const q = validate(RegistrySearchQuerySchema, req.query, 'query');
+    return hub.catalog.search(q.q, q.cursor);
+  });
 };

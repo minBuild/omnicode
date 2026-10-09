@@ -38,6 +38,7 @@ describe('loadHubConfig', () => {
       healthIntervalMs: DEFAULTS.healthIntervalMs,
       forwardLogMessages: true,
       cimdEnabled: true,
+      registryUrl: null,
       version: pkgVersion,
     });
     expect(path.isAbsolute(c.presetsDir)).toBe(true);
@@ -93,6 +94,8 @@ describe('loadHubConfig', () => {
     expect(loadHubConfig({}).forwardLogMessages).toBe(true);
     expect(loadHubConfig({ [ENV.forwardLogMessages]: '0' }).forwardLogMessages).toBe(false);
     expect(loadHubConfig({ [ENV.cimdEnabled]: 'false' }).cimdEnabled).toBe(false);
+    expect(loadHubConfig({ [ENV.registryUrl]: 'https://registry.example/' }).registryUrl).toBe('https://registry.example');
+    expect(() => loadHubConfig({ [ENV.registryUrl]: 'http://registry.example' })).toThrow();
   });
 
   it('normalizes the public URL and allows loopback http only in dev mode', () => {

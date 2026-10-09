@@ -28,7 +28,11 @@
 | C2 JSON 붙여넣기 | **완료** (원격 항목. stdio 는 C1 뒤) + 버그 수정: 실패 뒤 마법사 입력이 지워지던 문제 | 아래 커밋 |
 | C3 리소스 구독 전달 | **완료** + 버그 수정: modern `subscriptions/listen` 요청 형식이 스펙과 달랐음 (D24) | 아래 커밋 |
 | C4 프리셋 기여 운영 | 남음 — 외부 PR 이 있어야 한다 | — |
-| D (Phase 3) | 남음 — 대부분 Phase 0 결과(P2~P4)나 별도 결정에 달려 있다 | — |
+| D 레지스트리 검색 | **완료** — `OMNICODE_MCP_REGISTRY_URL` 을 설정했을 때만 켜진다 (기본 소스 결정은 설계 미결 5) | 아래 커밋 |
+| D 실행 단위 주입 (12.8) | 남음 — CLI 별 `--mcp-config` 류 지원을 P2~P4 에서 확인해야 한다 | — |
+| D 화면 elicitation (11.4) | 남음 — 폰 알림·대기 시간 같은 UX 결정이 먼저다 | — |
+| D tasks 확장 | 남음 — 공식 확장 스펙이 다운스트림 CLI 에 쓰이는지부터 확인 | — |
+| D 통합 엔드포인트 (미결 1) | 남음 — P2~P4 의 `list_changed` 지원 결과에 달려 있다 | — |
 
 이번 작업에서 새로 알게 된 것 (설계 0001 19.2.1·20장에 반영):
 
@@ -56,7 +60,7 @@
 ```bash
 npm install
 npx tsc -b                               # 타입 검사 (web 제외)
-npx vitest run                           # 53 파일 / 669 테스트 (node + web-dom 프로젝트)
+npx vitest run                           # 55 파일 / 674 테스트 (node + web-dom 프로젝트)
 npm run build                            # tsc + 마이그레이션 .sql 복사
 npm run build --workspace @omnicode/web  # Vite 빌드 (인라인 스크립트 없어야 함)
 npm run validate:presets

@@ -22,6 +22,7 @@ import type {
   OAuthStartResult,
   PatchServerBody,
   Preset,
+  RegistrySearchResult,
   ProtocolEra,
   ServerDetail,
   ServerRecord,
@@ -64,6 +65,11 @@ export interface HubConfig {
    * 인가 서버가 publicUrl 의 CIMD 문서를 가져갈 수 없는 배포(Tailscale 전용 ts.net 등)는 false 로 두면 DCR·직접 입력으로 넘어간다.
    */
   cimdEnabled: boolean;
+  /**
+   * MCP Registry 호환 API 의 기준 URL (예: https://registry.modelcontextprotocol.io). null 이면 검색을 끈다.
+   * 기본 소스는 정하지 않는다 (설계 미결 5). 요청은 guardedFetch 로 나간다.
+   */
+  registryUrl: string | null;
   presetsDir: string;
   version: string;
 }
@@ -539,8 +545,14 @@ export interface HubTokens {
   authenticate(token: string): Agent | null;
 }
 
+export interface HubCatalog {
+  /** 레지스트리 검색 (Phase 3). 설정이 없으면 { enabled: false } */
+  search(q: string, cursor?: string): Promise<RegistrySearchResult>;
+}
+
 export interface Hub {
   readonly config: HubConfig;
+  readonly catalog: HubCatalog;
   readonly registry: Registry;
   readonly servers: HubServers;
   readonly oauth: OAuthManager;

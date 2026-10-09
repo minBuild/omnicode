@@ -166,3 +166,36 @@ export interface SessionView {
 export interface ReauthResult {
   recentAuthUntil: string;
 }
+
+// ---------------------------------------------------------------------------
+// 레지스트리 검색 (설계 0001 9.1, handoff D — Phase 3)
+// ---------------------------------------------------------------------------
+export interface RegistryRemoteView {
+  type: 'streamable-http' | 'sse';
+  url: string;
+  /** URL 에 {변수} 가 있어 그대로는 추가할 수 없다 */
+  templated: boolean;
+  /** 서버가 요구하는 헤더 이름 (값은 사용자가 넣는다) */
+  headers: string[];
+}
+
+export interface RegistryServerView {
+  name: string;
+  title: string | null;
+  description: string;
+  version: string;
+  websiteUrl: string | null;
+  repositoryUrl: string | null;
+  remotes: RegistryRemoteView[];
+  /** 원격이 없고 패키지(stdio)만 있다 — 실행 샌드박스(C1) 전에는 추가할 수 없다 */
+  stdioOnly: boolean;
+  status: 'active' | 'deprecated' | null;
+}
+
+export interface RegistrySearchResult {
+  /** OMNICODE_MCP_REGISTRY_URL 이 없으면 false */
+  enabled: boolean;
+  source: string | null;
+  items: RegistryServerView[];
+  nextCursor: string | null;
+}

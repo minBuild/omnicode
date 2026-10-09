@@ -935,3 +935,10 @@ pre.command {
   cursor: pointer;
   padding: 0;
 }
+
+/* --- 레지스트리 검색 결과 ------------------------------------------- */
+.registry-remote {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+  margin-top: 8px;
+}

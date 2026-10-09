@@ -298,7 +298,8 @@ export function createServersService(deps: ServersServiceDeps): ServersService {
         if (!preset) throw new ApiError('not_found', `프리셋 ${input.presetId}을 찾을 수 없습니다`);
         url = preset.url;
         displayName ??= preset.displayName;
-      } else if (input.source === 'url') {
+      } else if (input.source === 'url' || input.source === 'registry') {
+        // registry: 검색 결과의 원격 URL. 이후 절차는 URL 추가와 같다 (탐지·SSRF 검사 포함)
         url = input.url as string;
       } else {
         jsonEntry = pickJsonEntry(input.json as string, input.entry);

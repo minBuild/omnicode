@@ -338,7 +338,7 @@ infra/           # systemd 유닛(agentd 는 .socket 활성화), iptables 가드
 | URL | `https://…/mcp` | MVP |
 | 프리셋 | 레포의 `presets/*.json` 중 선택 (예: Fish Audio) | MVP |
 | JSON 붙여넣기 | README에 흔한 `mcpServers` 블록 (VS Code `servers`, 감싸는 키 없는 맵, 단일 항목, Gemini `httpUrl`도 받는다) | Phase 2 — 원격(http) 항목 **구현** (D26). stdio 항목은 샌드박스(C1) 전까지 `unsupported_transport` |
-| 레지스트리 검색 | MCP Registry 호환 API 검색 | Phase 3 |
+| 레지스트리 검색 | MCP Registry 호환 API(`/v0.1/servers`) 검색 | Phase 3 — **구현** (`OMNICODE_MCP_REGISTRY_URL` 을 설정했을 때만, D27). 원격 항목만 추가 가능 |
 
 프리셋은 오픈소스 기여 지점이다. 누구나 PR로 `presets/<name>.json`을 추가할 수 있게 하되, 16.7의 검증을 거친다.
 
@@ -1096,7 +1096,7 @@ export interface DesiredAgentConfig {
 | GET | `/api/mcp/hub/status` | Hub 버전, 세대별 다운스트림 세션 수, agentd 상태, CLI 버전, 사설 주소 허용 여부 |
 | POST | `/api/mcp/hub/tokens/rotate` | `{ agents: ["claude"] }` (재인증 필요) |
 | GET | `/api/mcp/presets` | 프리셋 목록 (URL 포함) |
-| GET | `/api/mcp/registry/search?q=` | 레지스트리 검색 (Phase 3) |
+| GET | `/api/mcp/registry/search?q=&cursor=` | 레지스트리 검색. 설정이 없으면 `{ enabled: false }` (Phase 3, D27) |
 | GET | `/.well-known/omnicode/client.json` | CIMD 문서 (공개 경로) |
 
 **재인증(`requireRecentAuth`, 5분)** 이 필요한 작업: stdio 서버 생성·수정(Phase 2), Hub 토큰 재발급, 강제 삭제, `OMNICODE_MCP_ALLOW_PRIVATE_HOSTS`에 걸리는 서버 추가.
@@ -1438,6 +1438,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 | D23 | agentd 소켓은 systemd 소켓 활성화 | `RuntimeDirectory` + 추가 그룹 우회 | 소유권 충돌 없이 `omniagent:omnicode` 0660을 보장하고, API는 추가 그룹이 필요 없다 |
 | D24 | modern `subscriptions/listen` 은 스펙의 `params.notifications` 필터 객체를 쓴다 | 1차 구현의 `params.subscriptions` 배열 (스펙 문서 없이 추정) | 추정 형식으로는 실제 2026-07-28 서버에서 목록 변경 알림을 받지 못한다. 스펙 basic/patterns/subscriptions 로 확인 (2026-10-09) |
 | D25 | 리소스 구독은 풀이 참조 수를 세고, modern 은 리소스 전용 listen 스트림을 따로 둔다 | 세션마다 업스트림 구독, 목록 스트림에 합치기 | 업스트림 구독은 서버당 하나면 된다. 필터가 스트림을 열 때 정해지므로 합치면 URI 가 바뀔 때마다 목록 알림이 잠시 끊긴다 |
+| D27 | 레지스트리 검색은 설정한 엔드포인트만 쓰고 기본값을 두지 않는다. 응답은 신뢰하지 않는 입력으로 검증하고, https 원격·변수 없는 URL만 바로 추가한다 | 공식 레지스트리를 기본값으로 | 미결 5(어떤 소스를 권할지)를 미리 정하지 않는다. 추가는 URL 추가와 같은 탐지·SSRF 경로를 탄다 |
 | D26 | JSON 붙여넣기: 원격 항목만, 헤더는 하나만(시크릿으로 저장), `${VAR}` 같은 자리표시자면 키를 따로 입력받는다 | 모든 헤더 저장, stdio 도 받기 | 헤더 시크릿 형식이 하나다. stdio 는 실행 샌드박스(C1) 없이 받을 수 없다 |
 
 ---
@@ -1448,7 +1449,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 2. **OAuth 토큰 저장소** — 서버 수가 수십 개를 넘으면 단일 시크릿 또는 KMS로 암호화한 DB 컬럼으로 바꿀지.
 3. **CIMD 공개 경로** — Tailscale 전용 배포는 `OMNICODE_OAUTH_CIMD=0`으로 CIMD를 끄고 DCR·사전 등록을 쓴다 (19.2.1). 이것으로 충분한지는 Fish Audio가 무엇을 지원하는지(P7)가 첫 데이터다.
 4. **elicitation 화면 처리** — Hub가 `input_required`를 받아 OmniCode 화면에서 사용자에게 묻고 재시도하는 방식 (Phase 3).
-5. **레지스트리 소스** — 공식 MCP Registry는 preview 상태이고 다운스트림 aggregator 사용이 권장된다. 설정 가능한 OpenAPI 호환 엔드포인트로 둘 예정.
+5. **레지스트리 소스** — 공식 MCP Registry는 preview 상태이고 다운스트림 aggregator 사용이 권장된다. 검색은 설정 가능한 엔드포인트(`OMNICODE_MCP_REGISTRY_URL`, MCP Registry v0.1 호환)로 구현했고 기본값은 비워 뒀다. 어떤 소스를 기본으로 권할지가 남은 결정이다.
 6. **stdio 샌드박스 기술** — Docker vs bubblewrap 등. 네트워크 허용 정책. 구체적인 제안(Docker, 설치·실행 2단계, 실행은 기본 네트워크 없음)은 핸드오프 문서 C1에 있다. npx·uvx 는 시작할 때 레지스트리에 접속하므로 "기본 네트워크 차단"과 함께 쓰려면 설치 단계를 나눠야 한다는 점이 결정할 핵심이다.
 7. **에이전트 토큰 교체 주기** — 수동 재발급(현재안) + 90일 경과 시 화면 알림. 자동 교체는 러너의 실행 중 작업 처리와 함께 결정.
 8. **에이전트 컨테이너화** — 러너가 에이전트를 컨테이너에서 실행하게 되면 D2의 사용자 분리를 컨테이너 경계로 대체·보강할지.
@@ -1481,6 +1482,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 | 날짜 | 내용 |
 |---|---|
 | 2026-10-07 | 초안 작성 |
+| 2026-10-09 | 레지스트리 검색 (Phase 3 일부, D27) |
 | 2026-10-09 | 핸드오프 C2·C3 반영: JSON 붙여넣기(원격), 리소스 구독 전달, modern listen 형식을 스펙대로 수정, D24~D26 |
 | 2026-10-08 | 핸드오프 A1·D1~D9 반영: 인증은 0002로 분리, 로그 전달(11.3), 상태 점검(17.3), 소켓 활성화(17.1), OAuth 폴백·CIMD 끄기(19.2.1), D19~D23 |
 | 2026-10-08 | Phase 1 1차 구현 반영: 19.2.1 구현 메모, P1·P11 완료 표시, D17·D18 |

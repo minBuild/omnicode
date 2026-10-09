@@ -24,8 +24,7 @@ import {
   type SyncResult,
   type SyncStatus,
   type ToolRecord,
-  type ToolView,
-} from '@omnicode/shared';
+  type ToolView, type RegistrySearchResult } from '@omnicode/shared';
 import {
   NotFoundError,
   type Hub,
@@ -35,8 +34,7 @@ import {
   type HubTokens,
   type OAuthCallbackResult,
   type OAuthManager,
-  type Registry,
-} from '@omnicode/hub';
+  type Registry, type HubCatalog } from '@omnicode/hub';
 
 export const NOW = '2026-10-07T08:10:00.000Z';
 export const GRACE_UNTIL = '2026-10-07T08:25:00.000Z';
@@ -202,6 +200,7 @@ export const FAKE_HUB_CONFIG: HubConfig = {
   healthIntervalMs: 600_000,
   forwardLogMessages: true,
   cimdEnabled: true,
+  registryUrl: null,
   presetsDir: '/tmp/omnicode-api-test/presets',
   version: '0.1.0-test',
 };
@@ -255,6 +254,14 @@ export class FakeHub implements Hub {
     if (!d) throw new NotFoundError(`server ${id}`);
     return d;
   }
+
+  registrySearch: RegistrySearchResult = { enabled: false, source: null, items: [], nextCursor: null };
+  readonly catalog: HubCatalog = {
+    search: async (q, cursor) => {
+      this.hit('catalog.search', q, cursor);
+      return this.registrySearch;
+    },
+  };
 
   readonly servers: HubServers = {
     list: () => {
