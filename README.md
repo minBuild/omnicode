@@ -6,6 +6,7 @@
 > **In short (EN).** OmniCode is a self-hosted workspace that runs the official coding-agent CLIs on your own AWS account. Its first feature is an **MCP Hub**: register an MCP server once from your phone, finish its OAuth login in the browser, and Claude Code, Codex CLI and Gemini CLI all get it through a local endpoint. The hub is the only MCP client that talks to upstream servers, so tokens and API keys never reach the agents, which are treated as untrusted. It bridges two MCP protocol generations (2025-11-25 sessions and the stateless 2026-07-28 revision), implements OAuth 2.1 for MCP (CIMD/DCR, PKCE, RFC 9207 `iss`), and uses passkey-only login. TypeScript, ~17k lines of source, 674 tests.
 
 <p>
+<a href="https://github.com/minBuild/omnicode/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/minBuild/omnicode/actions/workflows/ci.yml/badge.svg"></a>
 <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-strict-3178c6">
 <img alt="Node" src="https://img.shields.io/badge/Node.js-22.13%2B-339933">
 <img alt="MCP" src="https://img.shields.io/badge/MCP-2025--11--25%20%2B%202026--07--28-6b4fbb">
