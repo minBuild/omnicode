@@ -337,7 +337,7 @@ infra/           # systemd 유닛(agentd 는 .socket 활성화), iptables 가드
 |---|---|---|
 | URL | `https://…/mcp` | MVP |
 | 프리셋 | 레포의 `presets/*.json` 중 선택 (예: Fish Audio) | MVP |
-| JSON 붙여넣기 | README에 흔한 `mcpServers` 블록 | Phase 2 |
+| JSON 붙여넣기 | README에 흔한 `mcpServers` 블록 (VS Code `servers`, 감싸는 키 없는 맵, 단일 항목, Gemini `httpUrl`도 받는다) | Phase 2 — 원격(http) 항목 **구현** (D26). stdio 항목은 샌드박스(C1) 전까지 `unsupported_transport` |
 | 레지스트리 검색 | MCP Registry 호환 API 검색 | Phase 3 |
 
 프리셋은 오픈소스 기여 지점이다. 누구나 PR로 `presets/<name>.json`을 추가할 수 있게 하되, 16.7의 검증을 거친다.
@@ -622,7 +622,7 @@ Hub는 업스트림에는 MCP 클라이언트, 에이전트에는 MCP 서버다.
 
 - **업스트림: 서버당 커넥터 1개, 모든 다운스트림이 공유.** 단일 사용자·단일 자격증명이므로 1:1 매핑의 이점이 없고, 업스트림 rate limit과 알림 수신이 한곳으로 모인다.
   - `legacy`: 세션 1개 유지. `initialize` 1회, GET 스트림 1개(서버가 지원하면). 404를 받으면 세션 만료로 보고 투명하게 재초기화한 뒤 **조회성 요청만** 재시도한다.
-  - `modern`: 세션 없음. `subscriptions/listen` 스트림 1개를 열고 `toolsListChanged`·`promptsListChanged`·`resourcesListChanged`를 구독한다. 끊기면 지수 백오프로 다시 연다.
+  - `modern`: 세션 없음. `subscriptions/listen` 스트림 1개를 열어 목록 변경을 구독한다. 요청 형식은 스펙대로 `params.notifications = { toolsListChanged: true, promptsListChanged: true, resourcesListChanged: true }`이고, 서버의 첫 메시지 `notifications/subscriptions/acknowledged`는 받아들인 필터다 (D24). 리소스 구독은 `resourceSubscriptions: [URI…]`를 담은 **별도** listen 스트림으로 하고, URI 집합이 바뀌면 그 스트림만 다시 연다 (필터는 스트림을 열 때 정해진다). 끊기면 지수 백오프로 다시 연다.
 - **다운스트림.**
   - `legacy` 클라이언트에게는 Hub가 `Mcp-Session-Id`를 발급한다. 세션은 메모리에만 있고(유휴 24시간 만료), Hub 재시작 시 사라진다. 재시작 뒤 옛 세션 ID로 오면 404를 돌려주고 클라이언트가 재초기화한다 (**확인[P5]**). GET 스트림과 DELETE를 받는다.
   - `modern` 클라이언트에게는 세션이 없다. `subscriptions/listen`을 받아 스트림을 열어 둔다.
@@ -639,7 +639,7 @@ Hub는 업스트림에는 MCP 클라이언트, 에이전트에는 MCP 서버다.
 | `tools/list` | 필터 후 응답 | 11.8. modern 응답에는 `ttlMs: 60000`, `cacheScope: "private"` |
 | `tools/call` | 검사 후 전달 | 감사 로그. `_meta.progressToken`은 그대로 전달 |
 | `resources/list`, `resources/templates/list`, `resources/read` | 전달 | 필터 없음 (MVP). 크기 제한 11.10 |
-| `resources/subscribe`, `resources/unsubscribe` (legacy) | `-32601` | MVP 미지원 |
+| `resources/subscribe`, `resources/unsubscribe` (legacy) | 업스트림이 `resources.subscribe`를 광고할 때만 받는다 | 풀이 서버·URI별 참조 수를 세어 처음 구독자만 업스트림에 구독하고, 마지막이 빠지면 끊는다. 업데이트는 그 URI를 구독한 세션에만 보낸다. 세션이 끝나면 그 세션의 구독을 푼다. 커넥터가 바뀌거나 legacy 세션이 다시 열리면 살아 있는 구독을 다시 건다 (C3, D25) |
 | `prompts/list`, `prompts/get` | 전달 | |
 | `completion/complete` | 전달 | 업스트림이 광고할 때만 |
 | `logging/setLevel` (legacy) | 수락만 하고 전달 안 함 | |
@@ -1389,7 +1389,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 
 | 단계 | 범위 | 완료 기준 |
 |---|---|---|
-| **Phase 2** | JSON 붙여넣기, stdio + 샌드박스 + 재인증, stdio 경고 화면, 프리셋 기여 가이드, `resources/subscribe` 전달 | stdio 서버가 컨테이너 안에서만 실행되고 호스트 홈·IMDS에 닿지 않는다. 변경된 도구가 재승인 전까지 차단된다 (Phase 1에서 이미 동작하되 여기서 E2E) |
+| **Phase 2** | ~~JSON 붙여넣기~~ (원격 항목 완료), stdio + 샌드박스 + 재인증, stdio 경고 화면, 프리셋 기여 가이드, ~~`resources/subscribe` 전달~~ (완료) | stdio 서버가 컨테이너 안에서만 실행되고 호스트 홈·IMDS에 닿지 않는다. 변경된 도구가 재승인 전까지 차단된다 (Phase 1에서 이미 동작하되 여기서 E2E) |
 | **Phase 3** | 레지스트리 검색, 실행 단위 주입, 사용량 통계, elicitation을 OmniCode 화면으로 받기, tasks 확장, 통합 엔드포인트(미결 1 결론에 따라) | — |
 
 ### 19.4 MVP 수용 테스트
@@ -1436,6 +1436,9 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 | D21 | 상태 점검·`list_changed`는 재탐지하지 않고 기존 연결로 목록만 다시 받음 | 매번 재탐지 | 재탐지는 연결을 끊어 진행 중인 도구 호출을 실패시킨다 |
 | D22 | OAuth 메타데이터를 주입된 fetch로 직접 읽고, "없음"이 확실할 때만 기본 엔드포인트로 폴백 | SDK 탐색 헬퍼 그대로 | SDK 헬퍼는 네트워크 오류를 "없음"으로 보고해 장애 중에 엉뚱한 엔드포인트로 폴백한다 |
 | D23 | agentd 소켓은 systemd 소켓 활성화 | `RuntimeDirectory` + 추가 그룹 우회 | 소유권 충돌 없이 `omniagent:omnicode` 0660을 보장하고, API는 추가 그룹이 필요 없다 |
+| D24 | modern `subscriptions/listen` 은 스펙의 `params.notifications` 필터 객체를 쓴다 | 1차 구현의 `params.subscriptions` 배열 (스펙 문서 없이 추정) | 추정 형식으로는 실제 2026-07-28 서버에서 목록 변경 알림을 받지 못한다. 스펙 basic/patterns/subscriptions 로 확인 (2026-10-09) |
+| D25 | 리소스 구독은 풀이 참조 수를 세고, modern 은 리소스 전용 listen 스트림을 따로 둔다 | 세션마다 업스트림 구독, 목록 스트림에 합치기 | 업스트림 구독은 서버당 하나면 된다. 필터가 스트림을 열 때 정해지므로 합치면 URI 가 바뀔 때마다 목록 알림이 잠시 끊긴다 |
+| D26 | JSON 붙여넣기: 원격 항목만, 헤더는 하나만(시크릿으로 저장), `${VAR}` 같은 자리표시자면 키를 따로 입력받는다 | 모든 헤더 저장, stdio 도 받기 | 헤더 시크릿 형식이 하나다. stdio 는 실행 샌드박스(C1) 없이 받을 수 없다 |
 
 ---
 
@@ -1446,7 +1449,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 3. **CIMD 공개 경로** — Tailscale 전용 배포는 `OMNICODE_OAUTH_CIMD=0`으로 CIMD를 끄고 DCR·사전 등록을 쓴다 (19.2.1). 이것으로 충분한지는 Fish Audio가 무엇을 지원하는지(P7)가 첫 데이터다.
 4. **elicitation 화면 처리** — Hub가 `input_required`를 받아 OmniCode 화면에서 사용자에게 묻고 재시도하는 방식 (Phase 3).
 5. **레지스트리 소스** — 공식 MCP Registry는 preview 상태이고 다운스트림 aggregator 사용이 권장된다. 설정 가능한 OpenAPI 호환 엔드포인트로 둘 예정.
-6. **stdio 샌드박스 기술** — Docker vs bubblewrap 등. 네트워크 허용 정책.
+6. **stdio 샌드박스 기술** — Docker vs bubblewrap 등. 네트워크 허용 정책. 구체적인 제안(Docker, 설치·실행 2단계, 실행은 기본 네트워크 없음)은 핸드오프 문서 C1에 있다. npx·uvx 는 시작할 때 레지스트리에 접속하므로 "기본 네트워크 차단"과 함께 쓰려면 설치 단계를 나눠야 한다는 점이 결정할 핵심이다.
 7. **에이전트 토큰 교체 주기** — 수동 재발급(현재안) + 90일 경과 시 화면 알림. 자동 교체는 러너의 실행 중 작업 처리와 함께 결정.
 8. **에이전트 컨테이너화** — 러너가 에이전트를 컨테이너에서 실행하게 되면 D2의 사용자 분리를 컨테이너 경계로 대체·보강할지.
 9. **Codex 승인 모드 필드** — P3 결과에 따라 12.7 표를 확정.
@@ -1478,6 +1481,7 @@ iptables  -I OUTPUT -o lo -p tcp --dport "${OMNICODE_API_PORT}" -m owner --uid-o
 | 날짜 | 내용 |
 |---|---|
 | 2026-10-07 | 초안 작성 |
+| 2026-10-09 | 핸드오프 C2·C3 반영: JSON 붙여넣기(원격), 리소스 구독 전달, modern listen 형식을 스펙대로 수정, D24~D26 |
 | 2026-10-08 | 핸드오프 A1·D1~D9 반영: 인증은 0002로 분리, 로그 전달(11.3), 상태 점검(17.3), 소켓 활성화(17.1), OAuth 폴백·CIMD 끄기(19.2.1), D19~D23 |
 | 2026-10-08 | Phase 1 1차 구현 반영: 19.2.1 구현 메모, P1·P11 완료 표시, D17·D18 |
 | 2026-10-07 | 개정 1. 신뢰 경계·위협 모델(7장) 신설, 사용자 분리와 IMDS 차단, 에이전트별 토큰, agentd, Hub 프로토콜 동작(11장: 세대 브리징·MRTR 정책·헤더·타임아웃·오류 코드), 동기화 어댑터 쓰기 안전과 헤드리스 승인 결정, OAuth 콜백 쿠키 독립·refresh 단일 비행·시크릿 형식 보강, 데이터 모델·API·테스트 전략·Phase 0 검증 목록·작업 순서·결정 기록 추가. 사실 정정: Gemini 설정의 환경변수 확장은 문서화됨, Claude Code의 빈 값 처리 변수는 고정 목록, Codex 문서 링크 이동 |

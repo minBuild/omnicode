@@ -24,7 +24,11 @@
 | D8 상태 점검 | **완료** + 버그 수정: 점검·`list_changed`가 진행 중 호출을 끊던 문제 | `23e3876` |
 | D9 계약 확장 | **완료** | `23e3876` |
 | D10 modern 다운스트림 | 보류 — SDK 1.32.1 이 아직 2026-07-28 미지원 (2026-10-08 확인) | — |
-| C·D (Phase 2·3) | 남음 | — |
+| C1 stdio 샌드박스 | **보류** — 이 환경에 Docker 데몬이 없어 격리 경계를 검증할 수 없고, 네트워크 정책(설계 미결 6)이 열려 있다. 아래 C1 에 구체적 제안 | — |
+| C2 JSON 붙여넣기 | **완료** (원격 항목. stdio 는 C1 뒤) + 버그 수정: 실패 뒤 마법사 입력이 지워지던 문제 | 아래 커밋 |
+| C3 리소스 구독 전달 | **완료** + 버그 수정: modern `subscriptions/listen` 요청 형식이 스펙과 달랐음 (D24) | 아래 커밋 |
+| C4 프리셋 기여 운영 | 남음 — 외부 PR 이 있어야 한다 | — |
+| D (Phase 3) | 남음 — 대부분 Phase 0 결과(P2~P4)나 별도 결정에 달려 있다 | — |
 
 이번 작업에서 새로 알게 된 것 (설계 0001 19.2.1·20장에 반영):
 
@@ -52,7 +56,7 @@
 ```bash
 npm install
 npx tsc -b                               # 타입 검사 (web 제외)
-npx vitest run                           # 49 파일 / 655 테스트 (node + web-dom 프로젝트)
+npx vitest run                           # 53 파일 / 669 테스트 (node + web-dom 프로젝트)
 npm run build                            # tsc + 마이그레이션 .sql 복사
 npm run build --workspace @omnicode/web  # Vite 빌드 (인라인 스크립트 없어야 함)
 npm run validate:presets
@@ -186,9 +190,17 @@ jsdom + React Testing Library 로 추가 마법사(승인 단계)와 서버 상�
 
 ## 3. 우선순위 C — Phase 2 (설계 19.3)
 
-1. **stdio 서버**: `transport: 'stdio'` 서버를 Docker 컨테이너(16.4: non-root, 읽기 전용 루트, 네트워크 기본 차단)에서 Hub 가 실행. 커넥터는 SDK `StdioClientTransport` 를 컨테이너 `docker run -i` 로 감싼다. 환경변수는 `stdio_env` 시크릿에서 실행 시에만 주입. 추가·수정에 `requireRecentAuth`.
-2. **JSON 붙여넣기**: `CreateServerBody.source = 'json'` 처리 (`packages/hub/src/services/servers.ts` 는 지금 `validation_error` 를 던진다). `McpServersJsonSchema` 로 파싱, http 항목은 URL 추가로, stdio 항목은 경고 화면(15장 7번) 뒤 1번으로.
-3. **`resources/subscribe` 전달**: 다운스트림 `-32601` 을 걷어내고 업스트림 구독을 팬아웃.
+1. **stdio 서버 (C1, 보류).** 구현 전에 아래 제안을 확정하고, Docker 데몬이 있는 호스트에서 검증한다.
+   - **실행기.** Docker. 실행기별 이미지: `npx` → `node:22-bookworm-slim`, `uvx` → `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`, `docker` → 사용자가 적은 이미지 (사용자의 docker 플래그는 버리고 `-e KEY`만 인정). 이미지는 설정으로 바꿀 수 있게 한다.
+   - **2단계.** 설치 단계는 네트워크를 켜고 서버별 named volume(`omnicode-mcp-<id>`, uid 65534 소유)에 패키지를 받는다 (`npm install --prefix /work <pkg>`, `uv tool install`). 실행 단계는 `--network none`(기본), `--read-only`, `--tmpfs /tmp`, 볼륨 읽기 전용, `--cap-drop ALL`, `--security-opt no-new-privileges`, `--user 65534:65534`, `--pids-limit 128`, `--memory 512m`, `--cpus 1`. npx·uvx 는 시작할 때 레지스트리에 접속하므로 이 분리가 없으면 "기본 네트워크 차단"을 지킬 수 없다.
+   - **네트워크 정책.** 서버별 `none`(기본) 또는 `egress`(브리지, 화면 경고 + 재인증으로만 켬). 도메인 허용 목록은 이그레스 프록시(Smokescreen)가 필요해 이후로 미룬다.
+   - **비밀값.** `stdio_env` 시크릿 값을 `docker run -e KEY`로 넘기고 값은 docker CLI 프로세스 환경에만 둔다 (명령줄·로그에 남기지 않는다).
+   - **수명.** 서버당 컨테이너 하나 (HTTP 와 같이 모든 다운스트림이 공유, 11.2). 비정상 종료는 백오프로 재시작, stderr 는 마스킹해 journald 로, 끄기·삭제 시 kill.
+   - **커넥터.** SDK `StdioClientTransport` 로 `docker run -i …` 를 띄워 `LegacyConnector` 에 전송 종류 `stdio` 를 추가한다.
+   - **화면·API.** 15장 7번 경고 화면(명령 전체, 위험 패턴 강조), `requireRecentAuth`, JSON 붙여넣기의 stdio 항목을 이 경로로 연결 (`services/servers.ts` 의 `pickJsonEntry` 가 지금은 `unsupported_transport` 를 던진다).
+   - **검증.** docker 인자 생성은 순수 함수로 단위 테스트, e2e 는 `npx -y @modelcontextprotocol/server-everything` 류 서버로 도구 호출, 홈·IMDS·네트워크 차단 확인 (`curl` 이 실패해야 한다).
+2. ~~**JSON 붙여넣기**~~ **완료 (원격 항목)**: `CreateServerBody.source = 'json'` 처리 (`packages/hub/src/services/servers.ts` 는 지금 `validation_error` 를 던진다). `McpServersJsonSchema` 로 파싱, http 항목은 URL 추가로, stdio 항목은 경고 화면(15장 7번) 뒤 1번으로.
+3. ~~**`resources/subscribe` 전달**~~ **완료**: 다운스트림 `-32601` 을 걷어내고 업스트림 구독을 팬아웃.
 4. **프리셋 기여 가이드 운영**: `presets/README.md` 를 공개하고 첫 외부 PR 리뷰.
 
 ## 4. 우선순위 D — Phase 3
