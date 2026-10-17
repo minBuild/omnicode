@@ -145,6 +145,7 @@ docs/       설계문서와 남은 작업
 |---|---|
 | [설계 0001 — MCP 화면 관리](docs/design/0001-mcp-management.md) | 위협 모델, 프로토콜 동작, 데이터 모델, API, 보안, 운영, 결정 기록 27개 |
 | [설계 0002 — 로그인과 재인증](docs/design/0002-auth.md) | 패스키 전용 인증, 세션 규칙, 복구 |
+| [설계 0003 — AWS 작업 공간](docs/design/0003-aws-workspace.md) | 본체 배포(Terraform, CloudFront VPC 오리진), 영상 편집 PC(DCV), iOS 빌드(Xcode Cloud) |
 | [남은 작업](docs/handoff/0001-mcp-remaining-work.md) | 항목별 진행 현황, 실제 환경 검증 목록 |
 
 ## 현재 상태
